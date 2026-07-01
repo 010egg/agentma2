@@ -53,6 +53,7 @@ export const SAFE_AUTO_ALLOW_TOOLS = new Set<string>([
 ]);
 
 const TOOL_SEARCH_TOOL_NAME = 'ToolSearch';
+const DEFAULT_TOOL_SEARCH_MODE = 'auto:5';
 
 function isFirstPartyAnthropicBaseUrl(baseUrl: string | undefined) {
   const raw = String(baseUrl || '').trim();
@@ -66,7 +67,17 @@ function isFirstPartyAnthropicBaseUrl(baseUrl: string | undefined) {
 }
 
 function resolveToolSearchEnvValue() {
-  return String(process.env.ENABLE_TOOL_SEARCH || '').trim() || 'true';
+  return String(process.env.ENABLE_TOOL_SEARCH || '').trim() || DEFAULT_TOOL_SEARCH_MODE;
+}
+
+function buildNonFirstPartyToolSearchWarning(mode: string) {
+  if (mode === 'true') {
+    return '当前 ANTHROPIC_BASE_URL 不是 Anthropic 官方端点，且 ENABLE_TOOL_SEARCH=true 会强制发送 tool_reference；如果网关不支持，请求可能失败。';
+  }
+  if (mode === 'auto' || mode.startsWith('auto:')) {
+    return '当前 ANTHROPIC_BASE_URL 不是 Anthropic 官方端点；ENABLE_TOOL_SEARCH=auto 仅在工具定义超过阈值时启用 ToolSearch，届时仍需要网关支持 tool_reference。';
+  }
+  return '当前 ANTHROPIC_BASE_URL 不是 Anthropic 官方端点；ToolSearch 启用后需要网关支持 tool_reference，否则请求可能失败或回退。';
 }
 
 function visualSkillWriteTarget(toolName: string, input: unknown, skills: string[] | undefined, cwd: string) {
@@ -1154,7 +1165,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
         type: 'run_log',
         level: 'warn',
         scope: 'tool_search',
-        message: '当前 ANTHROPIC_BASE_URL 不是 Anthropic 官方端点；ToolSearch 需要网关支持 tool_reference，否则请求可能失败或回退。',
+        message: buildNonFirstPartyToolSearchWarning(env.ENABLE_TOOL_SEARCH || DEFAULT_TOOL_SEARCH_MODE),
       });
     }
   }

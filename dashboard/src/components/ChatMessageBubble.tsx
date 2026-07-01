@@ -32,6 +32,36 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatDuration(ms: number) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatCost(usd: number) {
+  if (usd <= 0) return '$0';
+  if (usd < 0.0001) return '<$0.0001';
+  return `$${usd.toFixed(4)}`;
+}
+
+function MessageMeta({ message, isComplete }: { message: ChatMessage; isComplete: boolean }) {
+  if (message.timestamp <= 0 || (message.role !== 'user' && !isComplete)) return null;
+  const stats = message.role === 'assistant' ? message.runStats : undefined;
+  const items = [
+    new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    stats?.durationMs != null ? `耗时 ${formatDuration(stats.durationMs)}` : '',
+    stats?.inTok != null ? `${stats.inTok}↑ ${stats.outTok ?? 0}↓ tok` : '',
+    stats?.costUsd != null ? formatCost(stats.costUsd) : '',
+  ].filter(Boolean);
+  return (
+    <div style={{ fontSize: '.65em', color: 'var(--ink-muted)', marginTop: 4, opacity: 0.68 }}>
+      {items.join(' · ')}
+    </div>
+  );
+}
+
 function AttachmentGrid({ attachments }: { attachments: ChatAttachment[] }) {
   const images = attachments.filter((item): item is ChatImageAttachment => item.type === 'image');
   const files = attachments.filter((item) => item.type === 'file');
@@ -194,11 +224,7 @@ function ChatMessageBubble({ message, waitingLabel }: Props) {
 
       {isComplete && <CopyButton text={message.content} />}
 
-      {message.timestamp > 0 && (message.role === 'user' || isComplete) && (
-        <div style={{ fontSize: '.65em', color: 'var(--ink-muted)', marginTop: 4, opacity: 0.6 }}>
-          {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </div>
-      )}
+      <MessageMeta message={message} isComplete={isComplete} />
     </div>
   );
 }
@@ -217,6 +243,7 @@ function areMessagePropsEqual(prev: Props, next: Props): boolean {
         a.thinking === b.thinking &&
         a.status === b.status &&
         a.timestamp === b.timestamp &&
+        a.runStats === b.runStats &&
         a.attachments === b.attachments
       )
     )

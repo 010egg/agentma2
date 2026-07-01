@@ -661,7 +661,6 @@ label {
 .chat-msg {
   max-width: 80%; padding: 10px 16px; border-radius: 12px;
   font-size: .88em; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
-  animation: fadeIn .2s ease;
 }
 
 .chat-msg.user {
