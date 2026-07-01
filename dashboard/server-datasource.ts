@@ -5,21 +5,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import * as XLSX from 'xlsx';
+import readXlsxFile from 'read-excel-file/node';
 
 export const MAX_DATASOURCE_UPLOAD_BYTES = 50 * 1024 * 1024;
 export const DATASOURCE_QUERY_MAX_ROWS = 200;
 export const DATASOURCE_QUERY_MAX_BYTES = 64 * 1024;
-export const DATASOURCE_UPLOAD_EXTENSIONS = ['.sqlite', '.db', '.csv', '.xls', '.xlsx'];
+export const DATASOURCE_UPLOAD_EXTENSIONS = ['.sqlite', '.db', '.csv', '.xlsx'];
 
 export type DatasourceColumn = { name: string; type: string };
 export type DatasourceTable = { name: string; rowCount: number; columns: DatasourceColumn[] };
 
-export function datasourceUploadFormat(filename: string): 'sqlite' | 'csv' | 'xls' | 'xlsx' | null {
+export function datasourceUploadFormat(filename: string): 'sqlite' | 'csv' | 'xlsx' | null {
   const ext = path.extname(String(filename || '')).toLowerCase();
   if (ext === '.sqlite' || ext === '.db') return 'sqlite';
   if (ext === '.csv') return 'csv';
-  if (ext === '.xls') return 'xls';
   if (ext === '.xlsx') return 'xlsx';
   return null;
 }
@@ -151,25 +150,14 @@ function importTabularToSqlite(sheets: TabularSheet[], destPath: string) {
 }
 
 async function xlsxBufferToSheets(buffer: Buffer): Promise<TabularSheet[]> {
-  try {
-    const workbook = XLSX.read(buffer, {
-      type: 'buffer',
-      cellDates: true,
-      dense: true,
-    });
-    return workbook.SheetNames.map((sheetName) => {
-      const worksheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json<(string | number | boolean | Date | null)[]>(worksheet, {
-        header: 1,
-        raw: false,
-        defval: '',
-        blankrows: false,
-      }).map((cells) => cells.map(cellToString));
-      return { name: sheetName || 'Sheet1', rows };
-    }).filter((sheet) => sheet.rows.length > 0);
-  } catch (error) {
-    throw new Error(`Excel 文件解析失败: ${(error as Error).message || 'unknown'}`);
-  }
+  const parsed = await readXlsxFile(buffer) as unknown;
+  const sheets = Array.isArray(parsed) && parsed.every((item) => item && typeof item === 'object' && 'data' in item)
+    ? (parsed as Array<{ sheet?: string; data: unknown[][] }>).map((item, index) => ({
+      name: item.sheet || `Sheet${index + 1}`,
+      rows: item.data.map((cells) => cells.map(cellToString)),
+    }))
+    : [{ name: 'Sheet1', rows: (parsed as unknown[][]).map((cells) => cells.map(cellToString)) }];
+  return sheets.filter((sheet) => sheet.rows.length > 0);
 }
 
 // 上传入口:任意支持格式 → destDir/data.sqlite,返回探查出的表结构。

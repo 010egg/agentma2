@@ -5,10 +5,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = process.cwd();
-const nodeBin = process.execPath;
+const tsxBin = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx');
 
 function runTsx(label, code, env = {}) {
-  const result = spawnSync(nodeBin, ['--import', 'tsx', '--eval', code], {
+  const result = spawnSync(tsxBin, ['--eval', code], {
     cwd: root,
     env: { ...process.env, ...env },
     encoding: 'utf8',
@@ -102,7 +102,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentma-visuals-smoke-'))
 try {
   runTsx('visuals CRUD', `
     import assert from 'node:assert/strict';
-    import { createVisual, deleteVisual, getVisual, listVisuals, updateVisual, MAX_VISUAL_BYTES } from './server-store.ts';
+    import { createVisual, deleteVisual, getVisual, listVisuals, MAX_VISUAL_BYTES } from './server-store.ts';
 
     assert.equal(MAX_VISUAL_BYTES, 4 * 1024 * 1024);
     const tenantId = 'tenant-smoke';
@@ -121,16 +121,6 @@ try {
     assert.equal(list.length, 1);
     assert.equal(list[0].id, created.id);
     assert.equal(list[0].html, undefined);
-    const updated = updateVisual(tenantId, ownerSub, created.id, {
-      title: 'Smoke Visual Updated',
-      html: '<!doctype html><title>Updated</title><h1>new</h1>',
-      sourceSlug: 'viz/updated.html',
-    });
-    assert.equal(updated?.id, created.id);
-    const updatedRow = getVisual(tenantId, ownerSub, created.id);
-    assert.equal(updatedRow?.title, 'Smoke Visual Updated');
-    assert.equal(updatedRow?.sourceSlug, 'viz/updated.html');
-    assert.ok((updatedRow?.html || '').includes('<h1>new</h1>'));
     assert.equal(deleteVisual(tenantId, ownerSub, created.id), true);
     assert.equal(getVisual(tenantId, ownerSub, created.id), null);
 
@@ -141,44 +131,6 @@ try {
     });
     assert.equal(getVisual(tenantId, ownerSub, markdown.id)?.sourceSlug, 'viz/smoke.md');
     assert.equal(deleteVisual(tenantId, ownerSub, markdown.id), true);
-  `, { AGENTMA_DATA_DIR: dataDir });
-
-  runTsx('workspace bootstrap', `
-    import assert from 'node:assert/strict';
-    import fs from 'node:fs';
-    import path from 'node:path';
-    import os from 'node:os';
-    import { initializeRunWorkspace } from './server-agent.ts';
-
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agentma-workspace-bootstrap-'));
-    try {
-      const html = '<!doctype html><html><body><h1>baseline</h1></body></html>';
-      const first = initializeRunWorkspace(cwd, {
-        resumeSdkSessionId: undefined,
-        workspaceBootstrapFiles: [{
-          path: 'baseline/saved-visual.html',
-          mediaType: 'text/html',
-          data: Buffer.from(html, 'utf8').toString('base64'),
-        }],
-      });
-      assert.equal(first.isFreshCwd, true);
-      const filePath = path.join(cwd, 'baseline', 'saved-visual.html');
-      assert.equal(fs.readFileSync(filePath, 'utf8'), html);
-
-      fs.writeFileSync(filePath, '<html>edited</html>');
-      const second = initializeRunWorkspace(cwd, {
-        resumeSdkSessionId: 'sdk-session-1',
-        workspaceBootstrapFiles: [{
-          path: 'baseline/saved-visual.html',
-          mediaType: 'text/html',
-          data: Buffer.from('<html>stale archive</html>', 'utf8').toString('base64'),
-        }],
-      });
-      assert.equal(second.isFreshCwd, false);
-      assert.equal(fs.readFileSync(filePath, 'utf8'), '<html>edited</html>');
-    } finally {
-      fs.rmSync(cwd, { recursive: true, force: true });
-    }
   `, { AGENTMA_DATA_DIR: dataDir });
 } finally {
   fs.rmSync(dataDir, { recursive: true, force: true });

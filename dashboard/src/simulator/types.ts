@@ -404,7 +404,6 @@ export interface AgentTemplate {
   mcpServers: string[];
   eventSources: string[];
   skills: string[];
-  datasourceIds?: string[];
   effort: EffortLevel;
   maxTurns: number;
   permissionMode: PermissionMode;
@@ -541,7 +540,6 @@ export interface ChatSession {
   model: string;
   sdkSessionId?: string;
   sdkCwd?: string;
-  sourceVisualId?: string;
   visualPreprocessEnabled?: boolean;
   visualPreprocessModel?: string;
   forkedFromSessionId?: string;

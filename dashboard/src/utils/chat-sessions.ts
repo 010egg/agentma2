@@ -108,7 +108,6 @@ function normalizeSession(session: unknown): ChatSession | null {
   const model = String((session as { model?: unknown }).model || '');
   const sdkSessionId = String((session as { sdkSessionId?: unknown }).sdkSessionId || '');
   const sdkCwd = String((session as { sdkCwd?: unknown }).sdkCwd || '');
-  const sourceVisualId = String((session as { sourceVisualId?: unknown }).sourceVisualId || '');
   const visualPreprocessModel = String((session as { visualPreprocessModel?: unknown }).visualPreprocessModel || '');
   const forkedFromSessionId = String((session as { forkedFromSessionId?: unknown }).forkedFromSessionId || '');
   const forkedFromTitle = String((session as { forkedFromTitle?: unknown }).forkedFromTitle || '');
@@ -135,7 +134,6 @@ function normalizeSession(session: unknown): ChatSession | null {
     model,
     sdkSessionId: sdkSessionId || undefined,
     sdkCwd: sdkCwd || undefined,
-    sourceVisualId: sourceVisualId || undefined,
     visualPreprocessEnabled: Boolean((session as { visualPreprocessEnabled?: unknown }).visualPreprocessEnabled),
     visualPreprocessModel: visualPreprocessModel || undefined,
     forkedFromSessionId: forkedFromSessionId || undefined,
@@ -227,7 +225,7 @@ export async function saveChatSession(session: ChatSession): Promise<ChatSession
 
 export async function patchChatSession(
   sessionId: string,
-  patch: Partial<Pick<ChatSession, 'title' | 'pinned' | 'templateId' | 'model' | 'sdkSessionId' | 'sdkCwd' | 'sourceVisualId' | 'visualPreprocessEnabled' | 'visualPreprocessModel'>>,
+  patch: Partial<Pick<ChatSession, 'title' | 'pinned' | 'templateId' | 'model' | 'sdkSessionId' | 'sdkCwd' | 'visualPreprocessEnabled' | 'visualPreprocessModel'>>,
 ): Promise<ChatSession> {
   const res = await fetch(`/api/chat-sessions/${encodeURIComponent(sessionId)}`, {
     method: 'PATCH',

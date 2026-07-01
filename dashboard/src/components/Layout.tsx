@@ -10,8 +10,6 @@ const PAGE_META = [
   { match: (path: string) => path === '/agents', title: 'Agent 市场', eyebrow: 'agents', lede: '创建、配置和组合可复用 Agent。' },
   { match: (path: string) => path.startsWith('/agents/') && path.endsWith('/chat'), title: 'Agent Chat', eyebrow: 'agent runtime', lede: '直接和选定 Agent 运行一次真实会话。' },
   { match: (path: string) => path === '/playground', title: 'Playground', eyebrow: 'sdk query', lede: '调试 query 请求、工具、权限和模型参数。' },
-  { match: (path: string) => path === '/visuals', title: 'HTML 素材库', eyebrow: 'html archive', lede: '归档会话里保存下来的 HTML 页面，并从素材库继续发起改版。' },
-  { match: (path: string) => path === '/dashboard-studio', title: '看板工坊', eyebrow: 'dashboard studio', lede: '上传数据集，生成并编辑通用看板。' },
   { match: (path: string) => path === '/account', title: '账户管理', eyebrow: 'tenant', lede: '租户、供应商、用户、团队、API key、配额和审计。' },
   { match: (path: string) => path === '/settings', title: '全局设置', eyebrow: 'settings', lede: '会话、限制和工具默认配置。' },
   { match: (path: string) => path === '/tools', title: '工具背包', eyebrow: 'tools', lede: '维护本地工具、远程端点和标签。' },

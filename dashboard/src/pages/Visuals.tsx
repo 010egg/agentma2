@@ -1,50 +1,150 @@
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import VisualsLegacy from './VisualsLegacy';
-import './pages-visuals.css';
+import { getAuthHeaders } from '../utils/client-runtime';
+
+type VisualListItem = {
+  id: string;
+  title?: string;
+  createdAt: number;
+  sizeBytes: number;
+};
+
+async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  const data = text ? JSON.parse(text) as T : null;
+  if (!response.ok) {
+    const message = data && typeof data === 'object' && 'error' in (data as Record<string, unknown>)
+      ? String((data as Record<string, unknown>).error || '请求失败')
+      : `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  return data as T;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatTime(value: number) {
+  return value ? new Date(value).toLocaleString() : '未知';
+}
 
 export default function Visuals() {
+  const [items, setItems] = useState<VisualListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [deletingId, setDeletingId] = useState('');
+
+  const loadVisuals = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await fetch('/api/visuals', { headers: getAuthHeaders() });
+      const data = await readJson<VisualListItem[]>(response);
+      setItems(Array.isArray(data) ? data : []);
+    } catch (loadError) {
+      setError((loadError as Error).message || '读取可视化失败');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadVisuals();
+  }, [loadVisuals]);
+
+  const deleteVisual = async (visual: VisualListItem) => {
+    if (!window.confirm(`删除「${visual.title || '未命名'}」？`)) return;
+    setDeletingId(visual.id);
+    setError('');
+    try {
+      const response = await fetch(`/api/visuals/${encodeURIComponent(visual.id)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      await readJson<{ ok: boolean }>(response);
+      await loadVisuals();
+    } catch (deleteError) {
+      setError((deleteError as Error).message || '删除失败');
+    } finally {
+      setDeletingId('');
+    }
+  };
+
   return (
-    <div className="visuals-shell">
-      <div className="page-header visuals-page-header">
-        <div className="visuals-header-copy">
-          <h1>HTML 素材库</h1>
-          <p>这里只保留你在会话里确认并保存下来的 HTML 页面版本。页面生成和改版都回到会话里完成，这里负责归档、打开、继续修改和删除。</p>
-        </div>
-        <div className="visuals-header-actions">
-          <Link className="btn btn-primary" to="/conversations?agent=viz-agent">
-            去会话生成页面
-          </Link>
-          <span className="visuals-header-note">
-            使用流程：会话里生成预览，预览页点击“保存”，再回这里继续修改或管理历史页面。
-          </span>
-        </div>
+    <div className="visuals-page">
+      <div className="page-header">
+        <h1>我的可视化</h1>
+        <p>保存后的可视化产物会保留在这里，临时预览需要先在预览页保存。</p>
       </div>
 
-      <div className="visuals-guide-grid">
-        <article className="card visuals-guide-card">
-          <span className="visuals-guide-kicker">1. 会话生成</span>
-          <strong>先在会话里选模型和可视化助手</strong>
-          <p>页面设计、改标题、换结构、加模块都在会话里完成，不在素材库里直接编辑。</p>
-        </article>
-        <article className="card visuals-guide-card">
-          <span className="visuals-guide-kicker">2. 预览保存</span>
-          <strong>满意后保存成正式页面版本</strong>
-          <p>预览页保存后，这份 HTML 会进入素材库，不再只是一次性的临时链接。</p>
-        </article>
-        <article className="card visuals-guide-card">
-          <span className="visuals-guide-kicker">3. 继续修改</span>
-          <strong>从素材库回到会话继续迭代</strong>
-          <p>点击“继续修改”会把已保存 HTML 带回会话，直接基于当前版本继续改，而不是从零重做。</p>
-        </article>
-      </div>
+      {error && <div className="visual-inline-error" style={{ marginBottom: 16 }}>{error}</div>}
 
-      <section className="card visuals-archive-card">
-        <div className="visuals-archive-note">
-          <strong>归档说明</strong>
-          <p>下面保存的是已经确认过的页面版本。可以先打开核对原始页面，再点“继续修改”发起下一轮改版。</p>
+      <div className="card">
+        <div className="flex-between mb-4">
+          <div className="card-header" style={{ marginBottom: 0 }}>
+            可视化列表 {items.length > 0 && <span style={{ fontWeight: 400, color: 'var(--ink-muted)' }}>({items.length})</span>}
+          </div>
+          <button className="btn btn-sm" type="button" onClick={loadVisuals} disabled={loading}>
+            {loading ? '加载中…' : '刷新'}
+          </button>
         </div>
-        <VisualsLegacy embedded />
-      </section>
+
+        {items.length === 0 && !loading ? (
+          <div className="visuals-empty">
+            <strong>暂无已保存可视化</strong>
+            <p>在会话中打开临时预览后，点击预览页右上角的“保存”即可归档到这里。</p>
+            <Link className="btn btn-primary" to="/conversations">去会话</Link>
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>标题</th>
+                  <th>创建时间</th>
+                  <th>大小</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      <div className="visuals-title-cell">
+                        <strong>{item.title || '未命名'}</strong>
+                        <span>{item.id}</span>
+                      </div>
+                    </td>
+                    <td>{formatTime(item.createdAt)}</td>
+                    <td>{formatBytes(item.sizeBytes)}</td>
+                    <td>
+                      <div className="visual-row-actions">
+                        <Link className="btn btn-sm btn-primary" to={`/viz?id=${encodeURIComponent(item.id)}`}>打开</Link>
+                        <button
+                          className="btn btn-sm btn-danger"
+                          type="button"
+                          onClick={() => void deleteVisual(item)}
+                          disabled={deletingId === item.id}
+                        >
+                          {deletingId === item.id ? '删除中…' : '删除'}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {loading && (
+                  <tr>
+                    <td colSpan={4} style={{ color: 'var(--ink-muted)', textAlign: 'center', padding: '20px 0' }}>加载中…</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

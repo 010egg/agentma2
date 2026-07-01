@@ -11,7 +11,7 @@ const SECTIONS = [
       { path: '/conversations', label: '会话', icon: 'chat' },
       { path: '/agents', label: 'Agent 市场', icon: 'market' },
       { path: '/knowledge', label: '知识库', icon: 'book' },
-      { path: '/visuals', label: 'HTML 素材库', icon: 'chart' },
+      { path: '/visuals', label: '我的可视化', icon: 'chart' },
       { path: '/skills', label: '技能背包', icon: 'spark' },
       { path: '/account', label: '账户管理', icon: 'user' },
     ],

@@ -473,11 +473,6 @@ export interface RunAgentOptions {
   cwd?: string;
   /** Persistent template seed copied into a fresh run cwd before SDK query starts. */
   seedDir?: string;
-  workspaceBootstrapFiles?: Array<{
-    path: string;
-    mediaType?: string;
-    data: string;
-  }>;
   resumeSdkSessionId?: string;
   tenantId: string;
   sub: string;
@@ -595,50 +590,6 @@ function copyAgentSeedSafe(sourceDir: string, destDir: string) {
   };
 
   copyRecursive(sourceRoot, destRoot);
-}
-
-function writeWorkspaceBootstrapFiles(
-  cwd: string,
-  files: NonNullable<RunAgentOptions['workspaceBootstrapFiles']>,
-) {
-  for (const file of files) {
-    const relativePath = String(file.path || '').trim().replace(/\\/g, '/').replace(/^\.?\//, '');
-    if (!relativePath || relativePath.startsWith('../') || relativePath.includes('/../')) {
-      throw new Error(`workspace bootstrap path invalid: ${file.path}`);
-    }
-    const target = path.resolve(cwd, relativePath);
-    const resolvedCwd = path.resolve(cwd);
-    if (target !== resolvedCwd && !target.startsWith(resolvedCwd + path.sep)) {
-      throw new Error(`workspace bootstrap escaped cwd: ${relativePath}`);
-    }
-    const buffer = Buffer.from(String(file.data || '').replace(/\s/g, ''), 'base64');
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, buffer);
-  }
-}
-
-export function initializeRunWorkspace(
-  cwd: string,
-  options: Pick<RunAgentOptions, 'seedDir' | 'workspaceBootstrapFiles' | 'resumeSdkSessionId'>,
-) {
-  fs.mkdirSync(cwd, { recursive: true });
-  cleanupExpiredRunCwds(cwd);
-
-  const seedMarkerPath = path.join(cwd, AGENT_SEED_MARKER);
-  const isFreshCwd = !options.resumeSdkSessionId && !fs.existsSync(seedMarkerPath);
-  let didInitialize = false;
-  if (options.seedDir && isFreshCwd && fs.existsSync(options.seedDir)) {
-    copyAgentSeedSafe(options.seedDir, cwd);
-    didInitialize = true;
-  }
-  if (isFreshCwd && options.workspaceBootstrapFiles?.length) {
-    writeWorkspaceBootstrapFiles(cwd, options.workspaceBootstrapFiles);
-    didInitialize = true;
-  }
-  if (didInitialize) {
-    fs.writeFileSync(seedMarkerPath, String(Date.now()));
-  }
-  return { seedMarkerPath, isFreshCwd };
 }
 
 // Skill 投放,一句话: run 启动时把选中的 skill 从宿主技能库复制进 workspace 的
@@ -1160,7 +1111,15 @@ function appendUploadedImagePaths(prompt: string, files: MaterializedPromptImage
 
 export async function runAgent(opts: RunAgentOptions): Promise<void> {
   const cwd = opts.cwd || path.join('/tmp', `agentma-run-${opts.tenantId}-${Date.now()}`);
-  initializeRunWorkspace(cwd, opts);
+  fs.mkdirSync(cwd, { recursive: true });
+  cleanupExpiredRunCwds(cwd);
+
+  const seedMarkerPath = path.join(cwd, AGENT_SEED_MARKER);
+  const isFreshCwd = !opts.resumeSdkSessionId && !fs.existsSync(seedMarkerPath);
+  if (opts.seedDir && isFreshCwd && fs.existsSync(opts.seedDir)) {
+    copyAgentSeedSafe(opts.seedDir, cwd);
+    fs.writeFileSync(seedMarkerPath, String(Date.now()));
+  }
 
   // Per-call env: 仅白名单，绝不把宿主全部 process.env 灌进租户 run。
   const env: Record<string, string> = {};

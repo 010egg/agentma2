@@ -15,9 +15,6 @@ import {
   canAccessChatSession,
   createApiKey,
   createDatasource,
-  getDashboardRecord,
-  getLatestDashboardVersionRecord,
-  getDashboardVersionRecord,
   createTenantUser,
   createTeam,
   createVisual,
@@ -44,8 +41,6 @@ import {
   listChatSessions,
   listChatSessionSummaries,
   listDatasources,
-  listDashboards,
-  listDashboardVersions,
   listHookRules,
   listInternalToolSettings,
   listKnowledgeSources,
@@ -81,9 +76,6 @@ import {
   updateQuota,
   updateTenant,
   updateUserRole,
-  restoreDashboardVersion,
-  saveDashboardRecord,
-  updateVisual,
 } from './server-store.ts';
 import {
   runAgent,
@@ -99,20 +91,9 @@ import {
   runDatasourceQuery,
   serializeQueryResult,
   datasourceUploadFormat,
-  validateReadOnlySql,
   MAX_DATASOURCE_UPLOAD_BYTES,
   DATASOURCE_UPLOAD_EXTENSIONS,
 } from './server-datasource.ts';
-import {
-  buildDatasetProfile,
-  buildMockLayout,
-  listLegacyDashboards,
-  validateDashboardLayout,
-  widgetQuery,
-  saveDashboard,
-  loadDashboard,
-} from './server-dashboard.ts';
-import { generateLayoutByLLMWithProvider, askQuestionWithProvider, editDashboardByChatWithProvider, generateHtmlVisual, classifyChatIntent, summarizeQueryResult } from './server-dashboard-llm.ts';
 import { listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, outcomeToMessageStatus, type RunOutcome } from './src/simulator/run-state.ts';
 
@@ -732,7 +713,6 @@ function readWorkspaceVisual(auth: any, cid: string, relPath: string) {
     format: visualFormatFromPath(relPath),
     sourceSlug: relPath,
     mtimeMs: stat.mtimeMs,
-    sourceVisualId: session.sourceVisualId,
   };
 }
 
@@ -1273,13 +1253,6 @@ type ChatFileInput = {
   size: number;
 };
 
-type WorkspaceBootstrapFileInput = {
-  path: string;
-  mediaType: string;
-  data: string;
-  size: number;
-};
-
 const CHAT_IMAGE_MIME_TYPES = new Set<ChatImageMimeType>(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const CHAT_FILE_EXTENSIONS = new Set([
   '.md', '.markdown', '.txt', '.csv', '.json', '.yaml', '.yml', '.xml', '.html',
@@ -1415,36 +1388,6 @@ async function normalizeChatAttachments(value: unknown): Promise<{ images: ChatI
     }
   }
   return { images: normalizedImages.images, fileBlocks };
-}
-
-function normalizeWorkspaceBootstrapPath(value: unknown) {
-  const normalized = String(value || '').trim().replace(/\\/g, '/').replace(/^\.?\//, '');
-  if (!normalized || normalized.startsWith('/') || normalized.startsWith('../') || normalized.includes('/../')) return '';
-  return normalized.slice(0, 240);
-}
-
-function normalizeWorkspaceBootstrapFiles(value: unknown): { files: WorkspaceBootstrapFileInput[]; error?: string } {
-  if (!Array.isArray(value)) return { files: [] };
-  if (value.length > MAX_CHAT_FILES) return { files: [], error: `最多一次初始化 ${MAX_CHAT_FILES} 个工作区文件` };
-
-  const files: WorkspaceBootstrapFileInput[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') return { files: [], error: '工作区初始化文件格式无效' };
-    const raw = item as Record<string, unknown>;
-    const filePath = normalizeWorkspaceBootstrapPath(raw.path);
-    if (!filePath) return { files: [], error: '工作区初始化文件路径无效' };
-    const data = String(raw.data || '').replace(/^data:[^;]+;base64,/, '');
-    if (!/^[A-Za-z0-9+/=\s]+$/.test(data)) return { files: [], error: `工作区初始化文件 base64 无效: ${filePath}` };
-    const size = Number(raw.size) || base64SizeBytes(data);
-    if (size > MAX_VISUAL_BYTES) return { files: [], error: `工作区初始化文件不能超过 ${MAX_VISUAL_BYTES} bytes: ${filePath}` };
-    files.push({
-      path: filePath,
-      mediaType: typeof raw.mediaType === 'string' ? raw.mediaType : 'application/octet-stream',
-      data,
-      size,
-    });
-  }
-  return { files };
 }
 
 function parseChatFileUpload(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -1629,14 +1572,9 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   const datasourceIds = normalizeStringArray(req.body?.datasourceIds ?? template?.datasourceIds) || [];
   const skills = normalizeStringArray(req.body?.skills);
   const mcpServers = normalizeStringArray(template?.mcpServers || req.body?.mcpServers);
-  const sourceVisualId = typeof req.body?.sourceVisualId === 'string' && req.body.sourceVisualId.trim()
-    ? req.body.sourceVisualId.trim()
-    : '';
   const outputSchema = req.body?.outputSchema && typeof req.body.outputSchema === 'object' && !Array.isArray(req.body.outputSchema)
     ? req.body.outputSchema as Record<string, unknown>
     : undefined;
-  const workspaceBootstrapFiles = normalizeWorkspaceBootstrapFiles(req.body?.workspaceBootstrapFiles);
-  if (workspaceBootstrapFiles.error) { res.status(400).json({ error: workspaceBootstrapFiles.error }); return; }
 
   // Fold multi-turn history into systemPrompt so the model sees prior context.
   // When an SDK transcript id is available, resume that transcript and send
@@ -1680,15 +1618,6 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     runPrompt = prompt;
   } else {
     res.status(400).json({ error: 'need prompt or messages' }); return;
-  }
-  if (sessionId) {
-    // 只注入预览基址；如何生成可视化、怎么给链接、CSP/主题约定都在 agentma-visual skill 的 SKILL.md 里。
-    // sourceVisualId 注入支持覆盖保存链路：素材库"继续修改"流程下，预览页点保存能识别原 visual 并覆盖而非新建。
-    const visualPreviewBase = `/viz?cid=${encodeURIComponent(sessionId)}&path=${sourceVisualId ? `&sourceVisualId=${encodeURIComponent(sourceVisualId)}` : ''}`;
-    effectiveSystemPrompt = [
-      effectiveSystemPrompt,
-      `[可视化预览基址] ${visualPreviewBase}（生成可视化时按 agentma-visual skill 的约定，把 HTML 写到 ./viz/<slug>.html，然后用此基址拼上 viz/<slug>.html 作为 markdown 链接给用户）`,
-    ].filter(Boolean).join('\n\n');
   }
   const selectedModel = [
     model,
@@ -1752,7 +1681,6 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
       visualPreprocessModel: visualPreprocessModel || undefined,
       sdkSessionId: resumeSdkSessionId || undefined,
       sdkCwd: sdkCwd || undefined,
-      sourceVisualId: sourceVisualId || undefined,
       forkedFromSessionId: req.body?.forkedFromSessionId,
       forkedFromTitle: req.body?.forkedFromTitle,
       pinned: req.body?.pinned,
@@ -1823,7 +1751,6 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     subagents,
     skills,
     mcpServers,
-    workspaceBootstrapFiles: workspaceBootstrapFiles.files,
     cwd: sdkCwd || undefined,
     seedDir: resolveAgentSeedDirForTemplate(req.auth.tenantId, template),
     resumeSdkSessionId: resumeSdkSessionId || undefined,
@@ -1964,14 +1891,6 @@ function getChatOwnerSub(auth: { sub: string }) {
   return auth.sub;
 }
 
-function loadLegacyDashboardFile(dbPath: string, dashboardId: string) {
-  try {
-    return loadDashboard(dbPath, dashboardId);
-  } catch {
-    return null;
-  }
-}
-
 function providerField(provider: any, key: 'ANTHROPIC_AUTH_TOKEN' | 'ANTHROPIC_BASE_URL' | 'ANTHROPIC_MODEL') {
   return typeof provider?.[key] === 'string' ? provider[key].trim() : '';
 }
@@ -2035,49 +1954,6 @@ function describeBaseUrl(baseUrl: string) {
     return baseUrl || '<default>';
   }
 }
-
-function resolveDashboardProvider(tenantId: string, preferredModel = MODEL_HINTS.dashboard) {
-  const stored = resolveProviderProfileForModel(tenantId, preferredModel) || resolveProviderProfileForModel(tenantId, '');
-  const hasStoredToken = Boolean(stored?.ANTHROPIC_AUTH_TOKEN?.trim());
-  return {
-    apiKey: hasStoredToken ? stored!.ANTHROPIC_AUTH_TOKEN : (!stored ? (process.env.ANTHROPIC_API_KEY || '') : ''),
-    baseUrl: stored?.ANTHROPIC_BASE_URL || (!stored ? (process.env.ANTHROPIC_BASE_URL || '') : ''),
-    source: stored ? `profile:${stored.name}${hasStoredToken ? '' : ':missing_token'}` : 'env',
-  };
-}
-
-// 是否要走"AI 自由生成 HTML 大屏"。明确说大屏/HTML/炫酷自由排版才触发,
-// 避免抢掉普通的图表生成/编辑/问答。
-function shouldGenerateHtmlVisual(question: string) {
-  const compact = String(question || '').replace(/\s+/g, '');
-  return /(大屏|数据大屏|可视化大屏|html可视化|html页面|html大屏|自由排版|图文混排|海报|信息图|infographic|做个网页|生成网页|炫酷.*(可视化|大屏|页面)|高级.*(大屏|海报|信息图))/i.test(compact);
-}
-
-function shouldPreferDashboardEdit(question: string) {
-  const compact = String(question || '').replace(/\s+/g, '');
-
-  // 1) 明确的"改看板"动词/对象 → 一定是 edit
-  const explicitEdit = /(加|新增|添加|补|插入|放|塞|来|做|搞|生成).*(指标卡|kpi|图|图表|卡|卡片|组件|模块|趋势图|柱状图|折线图|饼图|环形图|漏斗图|散点图|热力图|仪表盘|表格|html)/i.test(compact)
-    || /(改看板|改页面|改样式|换样式|调样式|美化|好看|高级|统一|风格|主题|配色|颜色|换色|变色|底色|背景色|字体|字号|字大|字小|加粗|边框|圆角|阴影|间距|留白)/i.test(compact)
-    || /(调整布局|整体布局|整体排布|整个看板布局|整个布局|重排|重新排布|重新布局|重新整理|重新调整|布局乱|挤在一起|太挤)/i.test(compact)
-    || /(出边框|出边了|超出边框|溢出|挤出去|边框外面|放大|缩小|大一点|小一点|宽一点|窄一点|高一点|矮一点|太小|太大|太宽|太窄)/i.test(compact)
-    || /(删掉|删除|移除|去掉|删了吧|删了|不要了|干掉|隐藏)/i.test(compact)
-    || /(替换|改成|换成|改为|换为|变成)/i.test(compact)
-    || /(并列|排一行|同一行|对齐|挪上去|挪下去|放上面|放下面|放前面|放后面|靠左|靠右|置顶|移到)/i.test(compact)
-    || /(标题|改名|重命名|换个名)/i.test(compact);
-  if (explicitEdit) return true;
-
-  // 2) 明确的"问数据"信号 → 不是 edit(交给问答)
-  const looksLikeQuery = /(多少|几个|哪个|哪些|是什么|怎么样|如何|占比|比例|趋势|对比|排名|排行|top|最高|最低|最多|最少|平均|总共|合计|统计|分析一下|看看|查一下|算一下|为什么|分布)/i.test(compact);
-  if (looksLikeQuery) return false;
-
-  // 3) 其余短指令(且当前有看板)默认当编辑,避免"换个颜色吧"这种漏判
-  return compact.length <= 20;
-}
-
-const MODEL_HINTS = {
-  dashboard: process.env.AGENTMA_DASHBOARD_MODEL || 'claude-haiku-4-5-20251001',
-};
 
 // ═══ Auth Routes ═══
 app.post('/api/auth/register', (req, res) => {
@@ -3676,23 +3552,16 @@ app.post('/api/visuals', authMiddleware, (req: any, res) => {
   try {
     const cid = typeof req.body?.cid === 'string' ? req.body.cid : '';
     const relPath = typeof req.body?.path === 'string' ? req.body.path : '';
-    const requestedSourceVisualId = typeof req.body?.sourceVisualId === 'string' && req.body.sourceVisualId.trim()
-      ? req.body.sourceVisualId.trim()
-      : '';
     const explicitTitle = typeof req.body?.title === 'string' && req.body.title.trim()
       ? req.body.title.trim()
       : undefined;
-    const { html, format, sourceSlug, sourceVisualId: sessionSourceVisualId } = readWorkspaceVisual(req.auth, cid, relPath);
-    const sourceVisualId = requestedSourceVisualId || sessionSourceVisualId || '';
+    const { html, format, sourceSlug } = readWorkspaceVisual(req.auth, cid, relPath);
     if (Buffer.byteLength(html) > MAX_VISUAL_BYTES) throw makeHttpError('文件过大', 413);
-    const payload = {
+    const result = createVisual(req.auth.tenantId, getChatOwnerSub(req.auth), {
       title: explicitTitle || extractVisualTitle(html, format, sourceSlug),
       html,
       sourceSlug,
-    };
-    const result = sourceVisualId
-      ? updateVisual(req.auth.tenantId, getChatOwnerSub(req.auth), sourceVisualId, payload) || createVisual(req.auth.tenantId, getChatOwnerSub(req.auth), payload)
-      : createVisual(req.auth.tenantId, getChatOwnerSub(req.auth), payload);
+    });
     res.json(result);
   } catch (error) {
     const err = error as Error & { status?: number };
@@ -3730,16 +3599,7 @@ const datasourceUpload = multer({
 
 function parseDatasourceUpload(req: any, res: any, next: any) {
   datasourceUpload.single('file')(req, res, (error: unknown) => {
-    if (!error) {
-      // multer 把文件名按 latin-1 解码,中文会乱码;转回 utf-8
-      if (req.file?.originalname) {
-        try {
-          req.file.originalname = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
-        } catch {}
-      }
-      next();
-      return;
-    }
+    if (!error) { next(); return; }
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
       res.status(400).json({ error: `数据源文件不能超过 ${Math.round(MAX_DATASOURCE_UPLOAD_BYTES / 1024 / 1024)}MB` });
       return;
@@ -3832,422 +3692,6 @@ app.delete('/api/datasources/:id', authMiddleware, (req: any, res) => {
   res.json({ ok: true });
 });
 
-// ═══ Dashboard Studio Routes (AI 自动看板) ═══
-// POST /api/dashboard/profile         { datasourceId, tableName? } → DatasetProfile
-// POST /api/dashboard/generate        { datasourceId, tableName?, useMock? } → DashboardLayout
-// POST /api/dashboard/widget/query    { datasourceId, widget } → 行数据
-// PUT  /api/dashboard/:id             { layout } → 保存
-// GET  /api/dashboard/:id             ?datasourceId=… → DashboardLayout
-app.post('/api/dashboard/profile', authMiddleware, (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, req.body?.tableName);
-    res.json(profile);
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'profile 失败' });
-  }
-});
-
-app.post('/api/dashboard/generate', authMiddleware, async (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const useMock = req.body?.useMock === true;
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, req.body?.tableName);
-    if (useMock) {
-      res.json({ profile, layout: buildMockLayout(profile), source: 'mock' });
-      return;
-    }
-    const result = await generateLayoutByLLMWithProvider(profile, resolveDashboardProvider(req.auth.tenantId));
-    res.json({ profile, layout: result.layout, source: result.source, llmError: result.llmError });
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'generate 失败' });
-  }
-});
-
-app.post('/api/dashboard/widget/query', authMiddleware, (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const widget = req.body?.widget;
-  const tableName = String(req.body?.tableName || '') || source.tables?.[0]?.name;
-  if (!widget || !tableName) { res.status(400).json({ error: 'widget 或 tableName 缺失' }); return; }
-  try {
-    const result = widgetQuery(source.path, tableName, widget);
-    res.type('application/json').send(serializeQueryResult(result));
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'widget 查询失败' });
-  }
-});
-
-// ─── AI 问答 ─── 用户输入自然语言 → LLM 出 SQL+图+解读 → 后端跑 SQL → 返结果
-app.post('/api/dashboard/ask', authMiddleware, async (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const question = String(req.body?.question || '').trim();
-  if (!question) { res.status(400).json({ error: '问题不能为空' }); return; }
-  const history = Array.isArray(req.body?.history) ? req.body.history : [];
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, req.body?.tableName);
-    const ans = await askQuestionWithProvider(profile, question, history, resolveDashboardProvider(req.auth.tenantId));
-    if ('error' in ans) { res.status(400).json({ error: ans.error }); return; }
-
-    // 校验并执行 SQL
-    const sqlCheck = validateReadOnlySql(ans.sql);
-    if (!sqlCheck.ok) {
-      res.json({ ...ans, error: 'SQL 校验失败: ' + sqlCheck.reason, queryResult: null });
-      return;
-    }
-    let queryResult: any = null;
-    let queryError: string | null = null;
-    try {
-      queryResult = runDatasourceQuery(source.path, ans.sql);
-    } catch (e) {
-      queryError = (e as Error).message;
-    }
-    res.json({ ...ans, queryResult, queryError });
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'ask 失败' });
-  }
-});
-
-app.post('/api/dashboard/generate-html', authMiddleware, async (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const question = String(req.body?.question || '').trim();
-  if (!question) { res.status(400).json({ error: '问题不能为空' }); return; }
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, req.body?.tableName);
-    const runSql = (sql: string) => runDatasourceQuery(source.path, sql);
-    const result = await generateHtmlVisual(profile, question, runSql, resolveDashboardProvider(req.auth.tenantId));
-    if ('error' in result) { res.status(400).json({ error: result.error }); return; }
-    const saved = createVisual(req.auth.tenantId, getChatOwnerSub(req.auth), {
-      title: result.title,
-      html: result.html,
-    });
-    res.json({ visualId: saved.id, title: result.title });
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'generate-html 失败' });
-  }
-});
-
-app.post('/api/dashboard/chat', authMiddleware, async (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const question = String(req.body?.question || '').trim();
-  if (!question) { res.status(400).json({ error: '问题不能为空' }); return; }
-  const history = Array.isArray(req.body?.history) ? req.body.history : [];
-  const layout = req.body?.layout;
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, req.body?.tableName || layout?.meta?.tableName);
-
-    // 意图分类:正则强信号优先,否则用 LLM 判断(能处理跨轮指代/模糊措辞)
-    const provider = resolveDashboardProvider(req.auth.tenantId);
-    const hasLayout = layout && layout.version === '1.0';
-    let intent: 'edit' | 'query' | 'html' | 'chat';
-    if (shouldGenerateHtmlVisual(question)) {
-      intent = 'html';
-    } else if (hasLayout && shouldPreferDashboardEdit(question)) {
-      intent = 'edit';
-    } else {
-      intent = await classifyChatIntent(question, history, !!hasLayout, provider);
-      // 没有看板时 edit 无意义,降级成 query
-      if (intent === 'edit' && !hasLayout) intent = 'query';
-    }
-
-    // 1) HTML 大屏
-    if (intent === 'html') {
-      const runSql = (sql: string) => runDatasourceQuery(source.path, sql);
-      const htmlResult = await generateHtmlVisual(profile, question, runSql, provider);
-      if (!('error' in htmlResult)) {
-        const saved = createVisual(req.auth.tenantId, getChatOwnerSub(req.auth), {
-          title: htmlResult.title,
-          html: htmlResult.html,
-        });
-        res.json({
-          mode: 'html',
-          message: `已生成「${htmlResult.title}」HTML 可视化,点"付到看板"加入。`,
-          htmlWidget: { type: 'html', title: htmlResult.title, visualId: saved.id },
-        });
-        return;
-      }
-      // 失败继续走常规
-    }
-
-    const canEdit = intent === 'edit' && hasLayout;
-    if (canEdit) {
-      const currentCheck = validateDashboardLayout(layout, profile, { normalize: false });
-      const baseLayout = currentCheck.ok
-        ? currentCheck.layout
-        : (() => {
-          const repairedWidgets = Array.isArray(layout.widgets)
-            ? layout.widgets.map((widget: any) => ({ ...widget, manualEdited: false }))
-            : [];
-          const repairedCheck = validateDashboardLayout({ ...layout, widgets: repairedWidgets }, profile, { normalize: true });
-          if (!repairedCheck.ok) return null;
-          return {
-            ...repairedCheck.layout,
-            widgets: repairedCheck.layout.widgets.map((widget) => ({ ...widget, manualEdited: true })),
-          };
-        })();
-      if (baseLayout) {
-        const edited = await editDashboardByChatWithProvider(
-          profile,
-          baseLayout,
-          question,
-          history,
-          resolveDashboardProvider(req.auth.tenantId),
-        );
-        if (!('error' in edited)) {
-          res.json({
-            mode: 'edit',
-            message: edited.summary || '已按你的要求更新当前看板。',
-            layout: edited.layout,
-          });
-          return;
-        }
-      }
-    }
-
-    const ans = await askQuestionWithProvider(profile, question, history, resolveDashboardProvider(req.auth.tenantId));
-    if ('error' in ans) { res.status(400).json({ error: ans.error }); return; }
-
-    const sqlCheck = validateReadOnlySql(ans.sql);
-    if (!sqlCheck.ok) {
-      res.json({
-        mode: 'answer',
-        message: `❌ SQL 校验失败: ${sqlCheck.reason}`,
-        answer: { ...ans, error: 'SQL 校验失败: ' + sqlCheck.reason, queryResult: null },
-      });
-      return;
-    }
-
-    let queryResult: any = null;
-    let queryError: string | null = null;
-    try {
-      queryResult = runDatasourceQuery(source.path, ans.sql);
-    } catch (e) {
-      queryError = (e as Error).message;
-    }
-    // 拿到真实结果后,让 LLM 写一句带真数字的结论(失败回落到原 narrative)
-    let finalMessage = ans.narrative;
-    if (queryResult && Array.isArray(queryResult.rows) && queryResult.rows.length) {
-      const real = await summarizeQueryResult(question, ans.sql, queryResult.rows, resolveDashboardProvider(req.auth.tenantId));
-      if (real) finalMessage = real;
-    }
-    res.json({
-      mode: 'answer',
-      message: finalMessage,
-      answer: { ...ans, narrative: finalMessage, queryResult, queryError },
-    });
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'chat 失败' });
-  }
-});
-
-app.post('/api/dashboard/edit', authMiddleware, async (req: any, res) => {
-  const datasourceId = String(req.body?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source || !source.enabled) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const question = String(req.body?.question || '').trim();
-  if (!question) { res.status(400).json({ error: '问题不能为空' }); return; }
-  const layout = req.body?.layout;
-  if (!layout || layout.version !== '1.0') { res.status(400).json({ error: 'layout 非法' }); return; }
-  const history = Array.isArray(req.body?.history) ? req.body.history : [];
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, req.body?.tableName || layout.meta?.tableName);
-    const currentCheck = validateDashboardLayout(layout, profile, { normalize: false });
-    const baseLayout = currentCheck.ok
-      ? currentCheck.layout
-      : (() => {
-        const repairedWidgets = Array.isArray(layout.widgets)
-          ? layout.widgets.map((widget: any) => ({ ...widget, manualEdited: false }))
-          : [];
-        const repairedCheck = validateDashboardLayout({ ...layout, widgets: repairedWidgets }, profile, { normalize: true });
-        if (!repairedCheck.ok) {
-          res.status(400).json({ error: '当前看板校验失败', details: currentCheck.errors });
-          return null;
-        }
-        return {
-          ...repairedCheck.layout,
-          widgets: repairedCheck.layout.widgets.map((widget) => ({ ...widget, manualEdited: true })),
-        };
-      })();
-    if (!baseLayout) return;
-    const ans = await editDashboardByChatWithProvider(
-      profile,
-      baseLayout,
-      question,
-      history,
-      resolveDashboardProvider(req.auth.tenantId),
-    );
-    if ('error' in ans) { res.status(400).json({ error: ans.error }); return; }
-    res.json(ans);
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || 'edit 失败' });
-  }
-});
-
-app.put('/api/dashboard/:id', authMiddleware, (req: any, res) => {
-  const layout = req.body?.layout;
-  if (!layout || layout.version !== '1.0') { res.status(400).json({ error: 'layout 非法' }); return; }
-  const datasourceId = String(layout.meta?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source) { res.status(404).json({ error: 'datasource not found' }); return; }
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, layout.meta?.tableName);
-    const check = validateDashboardLayout(layout, profile, { normalize: false });
-    if (!check.ok) { res.status(400).json({ error: 'layout 校验失败', details: check.errors }); return; }
-    const ownerSub = getChatOwnerSub(req.auth);
-    const saved = saveDashboardRecord(req.auth.tenantId, ownerSub, {
-      id: req.params.id,
-      datasourceId,
-      tableName: check.layout.meta?.tableName,
-      name: String(check.layout.meta?.title || '').trim() || source.name || '未命名看板',
-      layoutJson: JSON.stringify(check.layout),
-      profileSnapshotJson: JSON.stringify(profile),
-      note: typeof req.body?.note === 'string' ? req.body.note.trim() : undefined,
-      createdBy: req.auth.email || req.auth.sub,
-      savedFrom: req.body?.savedFrom === 'chat' || req.body?.savedFrom === 'restore' ? req.body.savedFrom : 'studio',
-      sourceConversationId: typeof req.body?.sourceConversationId === 'string' ? req.body.sourceConversationId.trim() : undefined,
-      sourceMessageId: typeof req.body?.sourceMessageId === 'string' ? req.body.sourceMessageId.trim() : undefined,
-      sourceRunId: typeof req.body?.sourceRunId === 'string' ? req.body.sourceRunId.trim() : undefined,
-      sourceModel: typeof req.body?.sourceModel === 'string' ? req.body.sourceModel.trim() : undefined,
-      sourceAgentId: typeof req.body?.sourceAgentId === 'string' ? req.body.sourceAgentId.trim() : undefined,
-    });
-    res.json({
-      id: saved.dashboard.id,
-      layout: check.layout,
-      versionId: saved.version.id,
-      updatedAt: saved.dashboard.updatedAt,
-    });
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || '保存失败' });
-  }
-});
-
-app.get('/api/dashboard/:id', authMiddleware, (req: any, res) => {
-  const datasourceId = String(req.query?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source) { res.status(404).json({ error: 'datasource not found' }); return; }
-  const ownerSub = getChatOwnerSub(req.auth);
-  const dashboard = getDashboardRecord(req.auth.tenantId, ownerSub, req.params.id);
-  if (dashboard) {
-    const version = getLatestDashboardVersionRecord(req.auth.tenantId, ownerSub, dashboard.id);
-    if (!version) { res.status(404).json({ error: 'dashboard version not found' }); return; }
-    try {
-      const layout = JSON.parse(version.layoutJson);
-      res.json({
-        id: dashboard.id,
-        layout,
-        versionId: version.id,
-        createdAt: dashboard.createdAt,
-        updatedAt: dashboard.updatedAt,
-      });
-      return;
-    } catch {
-      res.status(500).json({ error: 'dashboard layout 已损坏' });
-      return;
-    }
-  }
-
-  const legacyLayout = loadLegacyDashboardFile(source.path, req.params.id);
-  if (!legacyLayout) { res.status(404).json({ error: 'dashboard not found' }); return; }
-  res.json({ id: req.params.id, layout: legacyLayout, legacy: true });
-});
-
-app.get('/api/dashboards', authMiddleware, (req: any, res) => {
-  const ownerSub = getChatOwnerSub(req.auth);
-  const datasourceId = typeof req.query?.datasourceId === 'string' ? req.query.datasourceId : '';
-  const dbDashboards = listDashboards(req.auth.tenantId, ownerSub, { datasourceId });
-  const knownIds = new Set(dbDashboards.map((item) => item.id));
-  const legacyDashboards = listDatasources(req.auth.tenantId)
-    .filter((source) => !datasourceId || source.id === datasourceId)
-    .flatMap((source) => listLegacyDashboards(source.path).map((legacy) => ({
-      id: legacy.id,
-      tenantId: req.auth.tenantId,
-      ownerSub,
-      datasourceId: source.id,
-      tableName: legacy.tableName,
-      name: legacy.name,
-      status: 'draft' as const,
-      latestVersionId: `legacy:${legacy.id}`,
-      latestVersionNo: 1,
-      versionCount: 1,
-      datasourceName: source.name,
-      createdAt: legacy.createdAt,
-      updatedAt: legacy.updatedAt,
-      legacy: true,
-    })))
-    .filter((item) => !knownIds.has(item.id));
-  res.json([...dbDashboards, ...legacyDashboards].sort((a, b) => b.updatedAt - a.updatedAt));
-});
-
-app.get('/api/dashboards/:id/versions', authMiddleware, (req: any, res) => {
-  const ownerSub = getChatOwnerSub(req.auth);
-  const dashboard = getDashboardRecord(req.auth.tenantId, ownerSub, req.params.id);
-  if (!dashboard) {
-    const hasLegacy = listDatasources(req.auth.tenantId).some((source) => Boolean(loadLegacyDashboardFile(source.path, req.params.id)));
-    if (hasLegacy) {
-      res.json([]);
-      return;
-    }
-    res.status(404).json({ error: 'dashboard not found' });
-    return;
-  }
-  res.json(listDashboardVersions(req.auth.tenantId, ownerSub, dashboard.id));
-});
-
-app.post('/api/dashboards/:id/restore/:versionId', authMiddleware, (req: any, res) => {
-  const ownerSub = getChatOwnerSub(req.auth);
-  const dashboard = getDashboardRecord(req.auth.tenantId, ownerSub, req.params.id);
-  if (!dashboard) { res.status(404).json({ error: 'dashboard not found' }); return; }
-  const version = getDashboardVersionRecord(req.auth.tenantId, ownerSub, dashboard.id, req.params.versionId);
-  if (!version) { res.status(404).json({ error: 'dashboard version not found' }); return; }
-  const restored = restoreDashboardVersion(req.auth.tenantId, ownerSub, dashboard.id, version.id, {
-    note: typeof req.body?.note === 'string' ? req.body.note.trim() : '',
-    createdBy: req.auth.email || req.auth.sub,
-  });
-  if (!restored) { res.status(404).json({ error: 'restore failed' }); return; }
-  try {
-    const layout = JSON.parse(restored.version.layoutJson);
-    res.json({
-      id: restored.dashboard.id,
-      layout,
-      versionId: restored.version.id,
-      restoredFromVersionId: version.id,
-      updatedAt: restored.dashboard.updatedAt,
-    });
-  } catch {
-    res.status(500).json({ error: 'restored dashboard layout 已损坏' });
-  }
-});
-
-// ─── 重新排布看板:把 widgets 走一遍 autoLayoutFix(尊重 manualEdited)
-app.post('/api/dashboard/relayout', authMiddleware, (req: any, res) => {
-  const layout = req.body?.layout;
-  if (!layout || layout.version !== '1.0') { res.status(400).json({ error: 'layout 非法' }); return; }
-  const datasourceId = String(layout.meta?.datasourceId || '');
-  const source = getDatasource(req.auth.tenantId, datasourceId);
-  if (!source) { res.status(404).json({ error: 'datasource not found' }); return; }
-  try {
-    const profile = buildDatasetProfile(datasourceId, source.path, layout.meta?.tableName);
-    // 强制重排:把所有 widget 的 manualEdited 暂时清掉,过 normalize=true 的 validate
-    const widgets = layout.widgets.map((w: any) => ({ ...w, manualEdited: false }));
-    const check = validateDashboardLayout({ ...layout, widgets }, profile, { normalize: true });
-    if (!check.ok) { res.status(400).json({ error: 'layout 校验失败', details: check.errors }); return; }
-    res.json({ layout: check.layout });
-  } catch (error) {
-    res.status(400).json({ error: (error as Error).message || '重排失败' });
-  }
-});
-
 // ═══ Chat Sessions Routes ═══
 app.get('/api/chat-sessions', authMiddleware, (req: any, res) => {
   const ownerSub = getChatOwnerSub(req.auth);
@@ -4286,16 +3730,7 @@ app.get('/api/chat-sessions/:id', authMiddleware, (req: any, res) => {
 });
 
 app.post('/api/chat-sessions', authMiddleware, (req: any, res) => {
-  const body = req.body && typeof req.body === 'object' ? { ...req.body } : {};
-  const sourceVisualId = typeof body.sourceVisualId === 'string' && body.sourceVisualId.trim()
-    ? body.sourceVisualId.trim()
-    : typeof body.source_visual_id === 'string' && body.source_visual_id.trim()
-      ? body.source_visual_id.trim()
-      : undefined;
-  const result = saveChatSession(req.auth.tenantId, getChatOwnerSub(req.auth), {
-    ...body,
-    ...(sourceVisualId ? { sourceVisualId } : {}),
-  });
+  const result = saveChatSession(req.auth.tenantId, getChatOwnerSub(req.auth), req.body || {});
   if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
   emitChatSessionEvent(result.session.id, { type: 'session_updated', updatedAt: result.session.updatedAt });
   res.json(result.session);

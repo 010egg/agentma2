@@ -1,4 +1,0 @@
-interface:
-  display_name: "Dashboard Generator"
-  short_description: "从数据源生成可编辑的看板配置"
-  default_prompt: "Use $dashboard-generator to turn this dataset into an editable dashboard config."

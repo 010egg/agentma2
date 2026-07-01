@@ -4,7 +4,6 @@ import VisualFrame from '../components/artifacts/VisualFrame';
 import MarkdownMindMap, { type MarkdownVisualMode } from '../components/artifacts/MarkdownMindMap';
 import LineIcon from '../components/LineIcon';
 import { getAuthHeaders } from '../utils/client-runtime';
-import { getChatSession } from '../utils/chat-sessions';
 import { isLikelyMarkdownMindMap } from '../utils/markdown-mindmap';
 
 type VisualPayload = {
@@ -15,7 +14,6 @@ type VisualPayload = {
   sourceSlug?: string;
   createdAt?: number;
   mtimeMs?: number;
-  sourceVisualId?: string;
 };
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -57,7 +55,6 @@ export default function VizPreview() {
   const id = searchParams.get('id')?.trim() || '';
   const cid = searchParams.get('cid')?.trim() || '';
   const relPath = searchParams.get('path')?.trim() || '';
-  const requestedSourceVisualId = searchParams.get('sourceVisualId')?.trim() || '';
   const isSaved = Boolean(id);
   const visualKey = `${id}\n${cid}\n${relPath}`;
   const [visual, setVisual] = useState<VisualPayload | null>(null);
@@ -67,7 +64,6 @@ export default function VizPreview() {
   const [saveError, setSaveError] = useState('');
   const [fullscreenError, setFullscreenError] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [sourceVisualId, setSourceVisualId] = useState('');
   const [markdownModeState, setMarkdownModeState] = useState<{ key: string; mode: MarkdownVisualMode }>({ key: '', mode: 'mindmap' });
   const markdownMode = markdownModeState.key === visualKey ? markdownModeState.mode : 'mindmap';
   const setMarkdownMode = (mode: MarkdownVisualMode) => setMarkdownModeState({ key: visualKey, mode });
@@ -92,10 +88,7 @@ export default function VizPreview() {
           : `/api/visuals/file?cid=${encodeURIComponent(cid)}&path=${encodeURIComponent(relPath)}`;
         const response = await fetch(url, { headers: getAuthHeaders() });
         const data = await readJson<VisualPayload>(response);
-        if (!cancelled) {
-          setVisual(data);
-          if (!id && data?.sourceVisualId) setSourceVisualId(String(data.sourceVisualId).trim());
-        }
+        if (!cancelled) setVisual(data);
       } catch (loadError) {
         if (!cancelled) {
           setVisual(null);
@@ -117,26 +110,6 @@ export default function VizPreview() {
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
   }, []);
 
-  useEffect(() => {
-    if (requestedSourceVisualId) {
-      setSourceVisualId(requestedSourceVisualId);
-      return;
-    }
-    if (!cid || id) {
-      setSourceVisualId('');
-      return;
-    }
-    let cancelled = false;
-    void getChatSession(cid)
-      .then((session) => {
-        if (!cancelled) setSourceVisualId(session?.sourceVisualId || '');
-      })
-      .catch(() => {
-        if (!cancelled) setSourceVisualId('');
-      });
-    return () => { cancelled = true; };
-  }, [cid, id, requestedSourceVisualId]);
-
   const saveVisual = async () => {
     if (!cid || !relPath || saving) return;
     setSaving(true);
@@ -145,7 +118,7 @@ export default function VizPreview() {
       const response = await fetch('/api/visuals', {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ cid, path: relPath, title: visual?.title, sourceVisualId: sourceVisualId || undefined }),
+        body: JSON.stringify({ cid, path: relPath, title: visual?.title }),
       });
       const data = await readJson<{ id: string }>(response);
       navigate(`/viz?id=${encodeURIComponent(data.id)}`, { replace: true });
@@ -242,12 +215,7 @@ export default function VizPreview() {
             <LineIcon name={isFullscreen ? 'collapse' : 'expand'} />
             {isFullscreen ? '退出全屏' : '全屏'}
           </button>
-          {isSaved && (
-            <Link className="btn btn-sm btn-primary" to={`/conversations?agent=viz-agent&visualId=${encodeURIComponent(id)}`}>
-              继续修改
-            </Link>
-          )}
-          <Link className="btn btn-sm" to="/visuals">返回素材库</Link>
+          <Link className="btn btn-sm" to="/visuals">我的可视化</Link>
           {!isSaved && (
             <button className="btn btn-sm btn-primary" type="button" onClick={saveVisual} disabled={saving}>
               {saving ? '保存中…' : '保存'}

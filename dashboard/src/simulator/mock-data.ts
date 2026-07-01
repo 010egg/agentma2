@@ -495,7 +495,6 @@ export const DEFAULT_SKILLS: SkillInfo[] = [
   { name: 'xlsx', description: '读写 Excel 电子表格', location: 'user', path: '~/.claude/skills/xlsx/', enabled: false },
   { name: 'pptx', description: '创建和编辑 PPT 演示文稿', location: 'user', path: '~/.claude/skills/pptx/', enabled: false },
   { name: 'agentma-visual', description: '把内容渲染成可预览和保存的 HTML/Markdown 可视化', location: 'user', path: '~/.claude/skills/agentma-visual/', enabled: true },
-  { name: 'dashboard-generator', description: '从数据源生成可编辑看板配置', location: 'project', path: '.claude/skills/dashboard-generator/', enabled: true },
   { name: 'code-review', description: '自动化代码审查助手', location: 'project', path: '.claude/skills/code-review/', enabled: true },
   { name: 'i18n-helper', description: '国际化翻译辅助工具', location: 'project', path: '.claude/skills/i18n-helper/', enabled: false },
   { name: 'api-doc-gen', description: '从代码生成 API 文档', location: 'project', path: '.claude/skills/api-doc-gen/', enabled: true },
