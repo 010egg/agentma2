@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { ClipboardEvent } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import type { ChatSession, AgentTemplate, ChatMessage, ChatRunStats, ProviderConfig, ChatAttachment } from '../simulator/types';
 import { initCustomTools } from '../simulator/mock-data';
 import type { EventSourceConfig } from '../simulator/types';
@@ -23,6 +23,7 @@ import ChatModelPicker from '../components/ChatModelPicker';
 import ModelPicker from '../components/common/ModelPicker';
 import ContextWindowMeter from '../components/ContextWindowMeter';
 import ContextCompactionEvents from '../components/ContextCompactionEvents';
+import LineIcon, { type LineIconName } from '../components/LineIcon';
 import {
   deriveRunPhase,
   isWaitingPhase,
@@ -128,10 +129,6 @@ async function readChatError(response: Response) {
   }
 }
 
-function formatShortId(value?: string | null) {
-  return value ? value.slice(0, 5) : '-';
-}
-
 function compareChatSessions(a: ChatSession, b: ChatSession) {
   if (a.pinned && !b.pinned) return -1;
   if (!a.pinned && b.pinned) return 1;
@@ -186,6 +183,42 @@ const EMPTY_PERMISSION_REQUESTS: PermissionRequest[] = [];
 const EMPTY_ASK_USER_QUESTIONS: AskUserQuestionRequest[] = [];
 const EMPTY_AGENT_TASKS: AgentTaskEvent[] = [];
 const EMPTY_CONTEXT_EVENTS: ContextCompactionEvent[] = [];
+const HEADER_TOOL_PREF_KEY = 'agentma:conversation-header-tools:v1';
+
+type HeaderToolKey = 'visual' | 'collaboration' | 'status' | 'context' | 'capabilities';
+type HeaderToolPreferences = Record<HeaderToolKey, boolean>;
+
+const DEFAULT_HEADER_TOOL_PREFERENCES: HeaderToolPreferences = {
+  visual: true,
+  collaboration: true,
+  status: true,
+  context: false,
+  capabilities: false,
+};
+
+const HEADER_TOOL_OPTIONS: Array<{ key: HeaderToolKey; label: string; description: string; icon: LineIconName }> = [
+  { key: 'visual', label: '视觉', description: '显示图片视觉预处理开关', icon: 'image' },
+  { key: 'collaboration', label: '协作', description: '显示协作开关和复制入口', icon: 'agents' },
+  { key: 'status', label: '运行状态', description: '运行时显示当前阶段', icon: 'radio' },
+  { key: 'context', label: '上下文', description: '显示上下文窗口用量', icon: 'chart' },
+  { key: 'capabilities', label: '能力', description: '显示知识库和 MCP 概览', icon: 'layers' },
+];
+
+function loadHeaderToolPreferences(): HeaderToolPreferences {
+  try {
+    const raw = localStorage.getItem(HEADER_TOOL_PREF_KEY);
+    const parsed = raw ? JSON.parse(raw) as Partial<HeaderToolPreferences> : {};
+    return {
+      visual: parsed.visual ?? DEFAULT_HEADER_TOOL_PREFERENCES.visual,
+      collaboration: parsed.collaboration ?? DEFAULT_HEADER_TOOL_PREFERENCES.collaboration,
+      status: parsed.status ?? DEFAULT_HEADER_TOOL_PREFERENCES.status,
+      context: parsed.context ?? DEFAULT_HEADER_TOOL_PREFERENCES.context,
+      capabilities: parsed.capabilities ?? DEFAULT_HEADER_TOOL_PREFERENCES.capabilities,
+    };
+  } catch {
+    return DEFAULT_HEADER_TOOL_PREFERENCES;
+  }
+}
 
 function createIdleSessionRunUiState(): SessionRunUiState {
   return {
@@ -202,7 +235,6 @@ function createIdleSessionRunUiState(): SessionRunUiState {
 }
 
 export default function Conversations() {
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedAgentId = searchParams.get('agent') || '';
   const joinSessionId = searchParams.get('join') || '';
@@ -223,6 +255,9 @@ export default function Conversations() {
   const [loadingSessionId, setLoadingSessionId] = useState('');
   const [sessionLoadError, setSessionLoadError] = useState('');
   const [mobileListOpen, setMobileListOpen] = useState(false);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [headerToolPrefs, setHeaderToolPrefs] = useState<HeaderToolPreferences>(() => loadHeaderToolPreferences());
+  const [headerDisplayOpen, setHeaderDisplayOpen] = useState(false);
 
   // 聊天状态
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -260,6 +295,25 @@ export default function Conversations() {
   const structuredOutput = activeRunUi?.structuredOutput ?? null;
   const runStats = activeRunUi?.runStats || null;
   const observedRunStats = runStats || (!isStreaming ? latestAssistantRunStats(messages) : null);
+  const isWelcomeState = messages.length === 0 && !isSessionDetailLoading && !sessionLoadError && !isStreaming;
+  const agentToolSummary = useMemo(() => {
+    const tools = currentAgent?.tools || [];
+    const customs = initCustomTools();
+    const servers = Array.from(new Set(
+      tools
+        .filter(t => customs.find(c => c.name === t)?.mcpServer)
+        .map(t => customs.find(c => c.name === t)!.mcpServer!)
+    )).map(server => {
+      const serverTools = customs.filter(c => c.mcpServer === server && tools.includes(c.name));
+      const firstEndpoint = serverTools.find(t => t.endpoint)?.endpoint;
+      return {
+        name: server,
+        toolCount: serverTools.length,
+        endpointUrl: firstEndpoint?.url || '',
+      };
+    });
+    return { tools, servers };
+  }, [currentAgent?.tools]);
   const pendingRunMessage = useMemo(() => findPendingRunMessage(messages), [messages]);
   const focusChatInput = useCallback(() => {
     requestAnimationFrame(() => {
@@ -285,6 +339,24 @@ export default function Conversations() {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    setMobileMoreOpen(false);
+    setHeaderDisplayOpen(false);
+    setShowEventToggles(false);
+  }, [activeSessionId, selectedAgentId]);
+
+  const updateHeaderToolPreference = useCallback((key: HeaderToolKey, value: boolean) => {
+    setHeaderToolPrefs(prev => {
+      const next = { ...prev, [key]: value };
+      try {
+        localStorage.setItem(HEADER_TOOL_PREF_KEY, JSON.stringify(next));
+      } catch {
+        // Preference persistence is optional; the in-memory toggle still works.
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!currentAgent || activeSessionId) return;
@@ -1681,6 +1753,259 @@ export default function Conversations() {
     runAbortControllersRef.current.get(activeSessionId)?.abort();
   }, [activeSessionId]);
 
+  const renderAgentControls = (options: { showModel?: boolean; showContext?: boolean; showVisual?: boolean } = {}) => {
+    if (!currentAgent) return null;
+    const { showModel = true, showContext = true, showVisual = true } = options;
+    return (
+      <>
+        {showModel && (
+          <ChatModelPicker
+            value={effectiveModel}
+            templateModel={currentAgent.model}
+            models={modelOptions}
+            disabled={isStreaming}
+            onChange={model => setSelectedModelOverride({ contextKey: modelContextKey, model })}
+          />
+        )}
+        {showContext && (
+          <ContextWindowMeter
+            model={effectiveModel}
+            inputTokens={observedRunStats?.inTok}
+            outputTokens={observedRunStats?.outTok}
+            compacted={contextEvents.length > 0}
+          />
+        )}
+        {showVisual && (
+          <>
+            <label
+              className={`badge ${visualPreprocessEnabled ? 'badge-info' : 'badge-muted'} conversation-visual-toggle`}
+              title="开启后图片先由视觉模型预处理，再交给当前 Agent"
+            >
+              <input
+                className="conversation-visual-toggle-input"
+                type="checkbox"
+                checked={visualPreprocessEnabled}
+                disabled={isStreaming}
+                onChange={event => {
+                  const enabled = event.target.checked;
+                  setVisualPreprocessEnabled(enabled);
+                  if (enabled && !visualPreprocessModel) setVisualPreprocessModel(defaultVisualPreprocessModel(currentAgent));
+                }}
+              />
+              <span className="conversation-visual-switch" aria-hidden="true" />
+              <LineIcon name="image" />
+            </label>
+            {visualPreprocessEnabled && (
+              <div className="conversation-visual-model-picker">
+                <ModelPicker
+                  value={visualPreprocessModel}
+                  models={modelOptions}
+                  onChange={setVisualPreprocessModel}
+                  placeholder="视觉模型"
+                />
+              </div>
+            )}
+          </>
+        )}
+      </>
+    );
+  };
+
+  const renderCapabilityBadges = () => (
+    <>
+      {((currentAgent?.knowledgeSourceIds || []).length > 0 || currentAgent?.useKnowledge) && (
+        <span className="badge badge-success">知识库×{(currentAgent?.knowledgeSourceIds || []).length || '全部'}</span>
+      )}
+      <span className={agentToolSummary.servers.length > 0 ? 'badge badge-success' : 'badge badge-muted'}>
+        MCP×{agentToolSummary.servers.length}
+      </span>
+      {agentToolSummary.tools.length === 0 && <span className="badge badge-muted">无工具</span>}
+    </>
+  );
+
+  const renderStatusBadges = () => (
+    <>
+      {runPhase !== 'idle' && (
+        <span className={`badge ${phaseBadgeClass(runPhase)}`}>{phaseLabel(runPhase)}</span>
+      )}
+      {((currentAgent?.knowledgeSourceIds || []).length > 0 || currentAgent?.useKnowledge) && (
+        <span className="badge badge-success">知识库×{(currentAgent?.knowledgeSourceIds || []).length || '全部'}</span>
+      )}
+      {agentToolSummary.servers.length > 0 ? (
+        <span className="badge" style={{ background: 'var(--success-bg)', color: 'var(--success)' }}>
+          MCP ×{agentToolSummary.servers.length}
+        </span>
+      ) : (
+        <span className="badge badge-muted">MCP ×0</span>
+      )}
+      {agentToolSummary.servers.map(server => (
+        <span key={server.name} className="conversation-mcp-server">
+          <span className="badge badge-muted">
+            {server.name} ({server.toolCount}工具)
+          </span>
+          {server.endpointUrl && <McpStatusDot server={server.name} endpoint={server.endpointUrl} />}
+        </span>
+      ))}
+      {agentToolSummary.tools.length === 0 && <span className="badge badge-muted">无工具</span>}
+    </>
+  );
+
+  const renderEventSourceControl = () => eventSources.length > 0 ? (
+    <span className="conversation-event-source-control">
+      <span
+        className="badge"
+        style={{
+          cursor: 'pointer',
+          background: subbedSources.length > 0 ? 'var(--success-bg)' : 'var(--bg-hover)',
+          color: subbedSources.length > 0 ? 'var(--success)' : 'var(--ink-muted)',
+          userSelect: 'none',
+        }}
+        onClick={() => setShowEventToggles(!showEventToggles)}
+      >
+        📡 {subbedSources.length > 0 ? subbedSources.length : '0'}
+      </span>
+      {showEventToggles && (
+        <div className="conversation-event-source-popover fade-in">
+          {eventSources.map(es => (
+            <label key={es.name}>
+              <input
+                type="checkbox"
+                checked={subbedSources.includes(es.name)}
+                onChange={() => {
+                  const next = subbedSources.includes(es.name) ? subbedSources.filter(s => s !== es.name) : [...subbedSources, es.name];
+                  setSubbedSources(next);
+                  localStorage.setItem(`session_subs_${activeSessionId}`, JSON.stringify(next));
+                  fetch(`/api/sessions/${activeSessionId}/events/subscribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sourceName: es.name }),
+                  }).catch(() => {});
+                }}
+              />
+              📡 {es.name}
+            </label>
+          ))}
+        </div>
+      )}
+    </span>
+  ) : null;
+
+  const renderCollaborationControls = () => activeSession ? (
+    <span className="conversation-collaboration-controls">
+      <span className={`badge ${activeSession.collaborationEnabled ? 'badge-success' : 'badge-muted'}`}>
+        协作{activeSession.collaborationEnabled ? `·${activeSession.collaborationRole === 'member' ? '成员' : 'Owner'}` : '关闭'}
+      </span>
+      {activeSession.collaborationRole !== 'member' && (
+        <button
+          className="btn btn-sm"
+          onClick={handleToggleCollaboration}
+          disabled={!activeSession.persisted}
+          title={activeSession.persisted ? undefined : '发送一条消息保存会话后才能开启协作'}
+        >
+          {activeSession.collaborationEnabled ? '关闭协作' : '开启协作'}
+        </button>
+      )}
+      {activeSession.collaborationEnabled && (
+        <button className="btn btn-sm" onClick={handleCopyCollaborationLink}>
+          {copyStatus || '复制链接'}
+        </button>
+      )}
+      {collaborationError && (
+        <span className="conversation-collaboration-error">{collaborationError}</span>
+      )}
+    </span>
+  ) : null;
+
+  const renderCollaborationQuickControl = () => {
+    const collaborationEnabled = activeSession?.collaborationEnabled === true;
+    const isMember = activeSession?.collaborationRole === 'member';
+    const canToggle = Boolean(activeSession && !isMember && activeSession.persisted && !isStreaming);
+    let title = '发送一条消息保存会话后才能开启协作';
+    if (isMember) title = '你是协作会话成员';
+    else if (activeSession?.persisted) title = '开启后可复制链接邀请他人协作';
+    return (
+      <>
+        <label
+          className={`badge ${collaborationEnabled ? 'badge-success' : 'badge-muted'} conversation-collaboration-quick`}
+          title={title}
+        >
+          <input
+            className="conversation-collaboration-quick-input"
+            type="checkbox"
+            checked={collaborationEnabled}
+            disabled={!canToggle}
+            onChange={() => {
+              void handleToggleCollaboration();
+            }}
+          />
+          <span className="conversation-collaboration-switch" aria-hidden="true" />
+          <LineIcon name="agents" />
+          <span className="conversation-collaboration-label">
+            {isMember ? '成员' : '协作'}
+          </span>
+        </label>
+        {collaborationEnabled && (
+          <button
+            className="btn btn-sm conversation-collaboration-copy"
+            onClick={handleCopyCollaborationLink}
+            title={copyStatus || '复制协作链接'}
+            aria-label={copyStatus || '复制协作链接'}
+          >
+            <LineIcon name="copy" />
+          </button>
+        )}
+      </>
+    );
+  };
+
+  const renderHeaderDisplayControl = () => (
+    <span className="conversation-header-display">
+      <button
+        type="button"
+        className="btn btn-sm conversation-header-display-button"
+        onClick={() => setHeaderDisplayOpen(open => !open)}
+        aria-expanded={headerDisplayOpen}
+        aria-label="选择顶部显示项"
+        title="选择顶部显示项"
+      >
+        <LineIcon name="sliders" />
+      </button>
+      {headerDisplayOpen && (
+        <div className="conversation-header-display-menu">
+          {HEADER_TOOL_OPTIONS.map(option => (
+            <label key={option.key} title={option.description}>
+              <input
+                type="checkbox"
+                checked={headerToolPrefs[option.key]}
+                onChange={event => updateHeaderToolPreference(option.key, event.target.checked)}
+              />
+              <LineIcon name={option.icon} />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+
+  const renderHeaderTools = () => (
+    <>
+      {renderAgentControls({
+        showModel: false,
+        showContext: headerToolPrefs.context,
+        showVisual: headerToolPrefs.visual,
+      })}
+      {headerToolPrefs.capabilities && renderCapabilityBadges()}
+      {headerToolPrefs.collaboration && renderCollaborationQuickControl()}
+      {headerToolPrefs.status && runPhase !== 'idle' && (
+        <span className={`badge ${phaseBadgeClass(runPhase)}`}>{phaseLabel(runPhase)}</span>
+      )}
+      {renderHeaderDisplayControl()}
+    </>
+  );
+
+  const headerTitle = activeSession ? getChatSessionDisplayTitle(activeSession) : '新对话';
+
   return (
     <div className="conversation-shell">
       <div
@@ -1690,60 +2015,54 @@ export default function Conversations() {
       {/* 左侧：历史对话列表 */}
       <div className={`conversation-sidebar ${mobileListOpen ? 'open' : ''}`}>
         {/* Agent 选择 + 新对话 */}
-        <div style={{ padding: '14px 14px 8px', borderBottom: '1px solid var(--border)' }}>
-          <div className="form-group" style={{ marginBottom: 8 }}>
+        <div className="conversation-sidebar-top">
+          <button
+            type="button"
+            className="conversation-new-chat-btn"
+            onClick={handleNew}
+            disabled={!selectedAgentId}
+          >
+            <span className="conversation-new-chat-icon" aria-hidden="true">+</span>
+            新对话
+          </button>
+          <div className="conversation-agent-picker">
             <select
               value={selectedAgentId}
               onChange={e => handleAgentChange(e.target.value)}
-              style={{ fontSize: '.82em' }}
             >
               {templates.length === 0 && <option value="">暂无 Agent</option>}
               {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </div>
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={handleNew}
-            disabled={!selectedAgentId}
-            style={{ width: '100%' }}
-          >
-            + 新对话
-          </button>
         </div>
 
         {/* 会话搜索 */}
         {selectedAgentSessions.length > 5 && (
-          <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+          <div className="conversation-session-search">
             <input
               value={sessionSearch}
               onChange={e => setSessionSearch(e.target.value)}
               placeholder="搜索会话..."
-              style={{ width: '100%', fontSize: '.78em', padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--ink)' }}
             />
           </div>
         )}
 
         {/* 会话列表 */}
-        <div ref={sidebarRef} style={{ flex: 1, overflowY: 'auto', padding: '8px 8px' }}>
+        <div ref={sidebarRef} className="conversation-session-list">
           {visibleSessions
             .map(s => (
               <div
                 key={s.id}
                 ref={activeSessionId === s.id ? activeItemRef : undefined}
                 onClick={() => { void handleSelect(s); }}
-                style={{
-                  padding: '10px 12px', borderRadius: 6, cursor: 'pointer',
-                  marginBottom: 4, transition: 'all .1s',
-                  background: activeSessionId === s.id ? 'var(--accent-bg)' : s.pinned ? 'var(--warning-bg)' : 'transparent',
-                }}
-                onMouseEnter={e => { if (activeSessionId !== s.id && !s.pinned) e.currentTarget.style.background = 'var(--bg-hover)'; }}
-                onMouseLeave={e => { if (activeSessionId !== s.id && !s.pinned) e.currentTarget.style.background = 'transparent'; }}
+                className={`conversation-session-item${activeSessionId === s.id ? ' active' : ''}${s.pinned ? ' pinned' : ''}`}
               >
                 {/* 标题行 */}
-                <div className="flex-between" style={{ marginBottom: 3 }}>
+                <div className="conversation-session-title-row">
                   {editingId === s.id ? (
                     <input
                       autoFocus
+                      className="conversation-session-title-input"
                       value={editTitle}
                       onChange={e => setEditTitle(e.target.value)}
                       onKeyDown={e => {
@@ -1752,11 +2071,10 @@ export default function Conversations() {
                       }}
                       onBlur={() => { void handleRename(s.id); }}
                       onClick={e => e.stopPropagation()}
-                      style={{ fontSize: '.82em', padding: '3px 6px', flex: 1 }}
                     />
                   ) : (
                     <div
-                      style={{ fontSize: '.84em', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}
+                      className="conversation-session-title"
                       onDoubleClick={e => { e.stopPropagation(); startRename(s); }}
                       title={`${getChatSessionDisplayTitle(s)} · 双击编辑标题`}
                     >
@@ -1771,40 +2089,49 @@ export default function Conversations() {
                       {phaseLabel(sessionRunUi[s.id].phase)}
                     </span>
                   )}
-                  <span
-                    onClick={e => { void handlePin(s.id, e); }}
-                    style={{ cursor: 'pointer', fontSize: '.85em', opacity: s.pinned ? 1 : .3, marginLeft: 4 }}
-                    title={s.pinned ? '取消置顶' : '置顶'}
-                  >📌</span>
-                </div>
-                <div className="flex-between" style={{ fontSize: '.72em', color: 'var(--ink-muted)' }}>
-                  <span>{templates.find(t => t.id === s.templateId)?.name || 'Agent'}</span>
-                  <span style={{ marginLeft: 8, whiteSpace: 'nowrap' }}>
-                    {s.collaborationEnabled && <span title={s.collaborationRole === 'member' ? '我加入的协作会话' : '我开启的协作会话'}>协作 · </span>}
-                    {s.messageCount ?? s.messages.length} 条
+                  <span className="conversation-session-actions">
+                    <button
+                      type="button"
+                      className={`conversation-session-action${s.pinned ? ' is-pinned' : ''}`}
+                      onClick={e => { void handlePin(s.id, e); }}
+                      title={s.pinned ? '取消置顶' : '置顶'}
+                      aria-label={s.pinned ? '取消置顶' : '置顶'}
+                    >
+                      <LineIcon name="pin" />
+                    </button>
+                    <button
+                      type="button"
+                      className="conversation-session-action"
+                      title="复制当前历史为一个新对话，并立即切换过去"
+                      aria-label="复制会话"
+                      onClick={e => { void handleCopySession(s, e); }}
+                    >
+                      <LineIcon name="copy" />
+                    </button>
+                    <button
+                      type="button"
+                      className="conversation-session-action danger"
+                      title="删除会话"
+                      aria-label="删除会话"
+                      onClick={e => { e.stopPropagation(); void handleDelete(s.id); }}
+                    >
+                      <LineIcon name="trash" />
+                    </button>
                   </span>
                 </div>
+                <div className="conversation-session-meta">
+                  <span className="conversation-session-agent">{templates.find(t => t.id === s.templateId)?.name || 'Agent'}</span>
+                  <span>
+                    {s.collaborationEnabled && <span title={s.collaborationRole === 'member' ? '我加入的协作会话' : '我开启的协作会话'}>协作 · </span>}
+                    {s.messageCount ?? s.messages.length}条
+                  </span>
+                  <span>{new Date(s.updatedAt).toLocaleDateString()}</span>
+                </div>
                 {s.forkedFromTitle && (
-                  <div style={{ fontSize: '.68em', color: 'var(--ink-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <div className="conversation-session-fork">
                     来自：{s.forkedFromTitle}
                   </div>
                 )}
-                <div className="flex-between" style={{ fontSize: '.68em', color: 'var(--ink-muted)', marginTop: 2 }}>
-                  <span>{new Date(s.updatedAt).toLocaleDateString()}</span>
-                  <span className="flex gap-2">
-                    <button
-                      className="btn btn-sm"
-                      style={{ padding: '0 6px', fontSize: '.85em' }}
-                      title="复制当前历史为一个新对话，并立即切换过去"
-                      onClick={e => { void handleCopySession(s, e); }}
-                    >复制</button>
-                    <button
-                      className="btn btn-sm"
-                      style={{ padding: '0 6px', fontSize: '.85em', color: 'var(--danger)' }}
-                      onClick={e => { e.stopPropagation(); void handleDelete(s.id); }}
-                    >删除</button>
-                  </span>
-                </div>
               </div>
             ))}
           {sessionsLoading && (
@@ -1829,12 +2156,16 @@ export default function Conversations() {
       {/* 右侧：对话区域 */}
       <div className="conversation-main">
         {!selectedAgentId ? (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-muted)' }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: '2em', marginBottom: 8 }}>💬</div>
-              <div>{templates.length === 0 ? (
-                <>请先去 <a href="/agents" style={{ color: 'var(--accent)' }}>Agent 市场</a> 创建 Agent</>
-              ) : '请选择一个 Agent 开始对话'}</div>
+          <div className="conversation-hero-wrap">
+            <div className="conversation-hero">
+              <div className="conversation-hero-title">
+                {templates.length === 0 ? '先创建一个 Agent' : '选择一个 Agent 开始'}
+              </div>
+              <div className="conversation-hero-subtitle">
+                {templates.length === 0 ? (
+                  <>去 <a href="/agents" style={{ color: 'var(--accent)' }}>Agent 市场</a> 创建你的第一个 Agent</>
+                ) : '从左侧列表选择一个 Agent，开始新的对话'}
+              </div>
             </div>
           </div>
         ) : (
@@ -1842,164 +2173,64 @@ export default function Conversations() {
             {/* 对话头部 */}
             <div className="conversation-header">
               <button
-                className="btn btn-sm conversation-list-toggle"
+                type="button"
+                className="icon-btn conversation-list-toggle"
                 onClick={() => setMobileListOpen(true)}
                 aria-label="打开会话列表"
+                title="历史对话"
               >
-                历史
+                <LineIcon name="chat" />
               </button>
-              <div style={{ fontWeight: 700, fontSize: '.95em' }}>{currentAgent?.name}</div>
-              <div className="flex gap-2" style={{ flexWrap: 'wrap', flex: 1 }}>
-                <span
-                  className="conversation-id-badge"
-                  title={activeSession?.id ? `对话id: ${activeSession.id}` : '对话id 暂无'}
-                >
-                  对话id {formatShortId(activeSession?.id)}
+              <div className="conversation-title">
+                <span className="conversation-title-icon" aria-hidden="true">
+                  <LineIcon name="chat" />
                 </span>
-                <span
-                  className="conversation-id-badge"
-                  title={activeSession?.sdkSessionId ? `会话id: ${activeSession.sdkSessionId}` : '会话id 暂无'}
-                >
-                  会话id {formatShortId(activeSession?.sdkSessionId)}
+                <span className="conversation-title-text">
+                  <span className="conversation-title-name" title={headerTitle}>
+                    {headerTitle}
+                  </span>
+                  <span className="conversation-title-meta">
+                    {currentAgent?.name || 'Agent'} · {messages.length} 条
+                  </span>
                 </span>
-                {currentAgent && (
-                  <>
-                  <ChatModelPicker
-                    value={effectiveModel}
-                    templateModel={currentAgent.model}
-                    models={modelOptions}
-                    disabled={isStreaming}
-                    onChange={model => setSelectedModelOverride({ contextKey: modelContextKey, model })}
-                  />
-                  <ContextWindowMeter
-                    model={effectiveModel}
-                    inputTokens={observedRunStats?.inTok}
-                    outputTokens={observedRunStats?.outTok}
-                    compacted={contextEvents.length > 0}
-                  />
-                  <label
-                    className="badge badge-muted"
-                    title="开启后图片先由视觉模型预处理，再交给当前 Agent"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: isStreaming ? 'not-allowed' : 'pointer' }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={visualPreprocessEnabled}
-                      disabled={isStreaming}
-                      onChange={event => {
-                        const enabled = event.target.checked;
-                        setVisualPreprocessEnabled(enabled);
-                        if (enabled && !visualPreprocessModel) setVisualPreprocessModel(defaultVisualPreprocessModel(currentAgent));
-                      }}
-                      style={{ width: 'auto', margin: 0 }}
-                    />
-                    视觉预处理
-                  </label>
-                  {visualPreprocessEnabled && (
-                    <div style={{ width: 220, maxWidth: '100%' }}>
-                      <ModelPicker
-                        value={visualPreprocessModel}
-                        models={modelOptions}
-                        onChange={setVisualPreprocessModel}
-                        placeholder="视觉模型"
-                      />
-                    </div>
-                  )}
-                  </>
-                )}
-                {runPhase !== 'idle' && (
-                  <span className={`badge ${phaseBadgeClass(runPhase)}`}>{phaseLabel(runPhase)}</span>
-                )}
-                {((currentAgent?.knowledgeSourceIds || []).length > 0 || currentAgent?.useKnowledge) && (
-                  <span className="badge badge-success">知识库×{(currentAgent?.knowledgeSourceIds || []).length || '全部'}</span>
-                )}
-                {(() => {
-                  const tools = currentAgent?.tools || [];
-                  const customs = initCustomTools();
-                  const serverNames = Array.from(new Set(
-                    tools
-                      .filter(t => customs.find(c => c.name === t)?.mcpServer)
-                      .map(t => customs.find(c => c.name === t)!.mcpServer!)
-                  ));
-                  return (
-                    <>
-                      {serverNames.length > 0 ? (
-                        <span className="badge" style={{ background: 'var(--success-bg)', color: 'var(--success)' }}>
-                          MCP ×{serverNames.length}
-                        </span>
-                      ) : (
-                        <span className="badge badge-muted">MCP ×0</span>
-                      )}
-                      {serverNames.map(s => {
-                        const serverTools = customs.filter(c => c.mcpServer === s && tools.includes(c.name));
-                        const firstEndpoint = serverTools.find(t => t.endpoint)?.endpoint;
-                        return (
-                          <span key={s} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            <span className="badge badge-muted" style={{ fontFamily: 'var(--font-mono)', fontSize: '.7em' }}>
-                              {s} ({serverTools.length}工具)
-                            </span>
-                            {firstEndpoint && <McpStatusDot server={s} endpoint={firstEndpoint.url} />}
-                          </span>
-                        );
-                      })}
-                      {tools.length === 0 && <span className="badge badge-muted">无工具</span>}
-                    </>
-                  );
-                })()}
-                {/* 事件源开关（会话级） */}
-                {eventSources.length > 0 && (
-                  <span style={{ position: 'relative' }}>
-                    <span className="badge" style={{ cursor: 'pointer', background: subbedSources.length > 0 ? 'var(--success-bg)' : 'var(--bg-hover)', color: subbedSources.length > 0 ? 'var(--success)' : 'var(--ink-muted)', userSelect: 'none' }}
-                      onClick={() => setShowEventToggles(!showEventToggles)}>
-                      📡 {subbedSources.length > 0 ? subbedSources.length : '0'}
-                    </span>
-                    {showEventToggles && (
-                      <div className="fade-in" style={{ position: 'absolute', top: 24, left: 0, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 10px', zIndex: 20, minWidth: 160, boxShadow: '0 4px 12px rgba(0,0,0,.15)' }}>
-                        {eventSources.map(es => (
-                          <label key={es.name} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', fontSize: '.8em', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-                            <input type="checkbox" checked={subbedSources.includes(es.name)} onChange={() => {
-                              const next = subbedSources.includes(es.name) ? subbedSources.filter(s => s !== es.name) : [...subbedSources, es.name];
-                              setSubbedSources(next);
-                              localStorage.setItem(`session_subs_${activeSessionId}`, JSON.stringify(next));
-                              fetch(`/api/sessions/${activeSessionId}/events/subscribe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceName: es.name }) }).catch(() => {});
-                            }} style={{ width: 'auto', margin: 0 }} />
-                            📡 {es.name}
-                          </label>
-                        ))}
-                      </div>
-                    )}
-                  </span>
-                )}
-                {activeSession && (
-                  <span className="flex gap-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span className={`badge ${activeSession.collaborationEnabled ? 'badge-success' : 'badge-muted'}`}>
-                      协作{activeSession.collaborationEnabled ? `·${activeSession.collaborationRole === 'member' ? '成员' : 'Owner'}` : '关闭'}
-                    </span>
-                    {activeSession.collaborationRole !== 'member' && (
-                      <button
-                        className="btn btn-sm"
-                        onClick={handleToggleCollaboration}
-                        disabled={!activeSession.persisted}
-                        title={activeSession.persisted ? undefined : '发送一条消息保存会话后才能开启协作'}
-                      >
-                        {activeSession.collaborationEnabled ? '关闭协作' : '开启协作'}
-                      </button>
-                    )}
-                    {activeSession.collaborationEnabled && (
-                      <button className="btn btn-sm" onClick={handleCopyCollaborationLink}>
-                        {copyStatus || '复制链接'}
-                      </button>
-                    )}
-                    {collaborationError && (
-                      <span style={{ color: 'var(--danger)', fontSize: '.76em' }}>{collaborationError}</span>
-                    )}
-                  </span>
-                )}
               </div>
-              <button className="btn btn-sm" onClick={() => navigate('/agents')}>Agent 市场</button>
+              <div className="conversation-header-tools">
+                {renderHeaderTools()}
+              </div>
+              <button
+                type="button"
+                className={`icon-btn conversation-mobile-more${mobileMoreOpen ? ' open' : ''}`}
+                onClick={() => setMobileMoreOpen(open => !open)}
+                aria-label={mobileMoreOpen ? '关闭更多设置' : '打开更多设置'}
+                aria-expanded={mobileMoreOpen}
+                aria-controls="conversation-mobile-panel"
+                title={mobileMoreOpen ? '关闭更多' : '更多'}
+              >
+                <LineIcon name={mobileMoreOpen ? 'x' : 'gear'} />
+              </button>
+            </div>
+            <div
+              id="conversation-mobile-panel"
+              className={`conversation-mobile-panel${mobileMoreOpen ? ' open' : ''}`}
+            >
+              <div className="conversation-mobile-section">
+                <div className="conversation-mobile-section-title">模型与上下文</div>
+                <div className="conversation-mobile-control-row">
+                  {renderAgentControls()}
+                </div>
+              </div>
+              <div className="conversation-mobile-section">
+                <div className="conversation-mobile-section-title">运行状态</div>
+                <div className="conversation-mobile-control-row">
+                  {renderStatusBadges()}
+                  {renderEventSourceControl()}
+                  {renderCollaborationControls()}
+                </div>
+              </div>
             </div>
 
             {/* 消息列表 */}
+            <div className={`conversation-body${isWelcomeState ? ' is-welcome' : ''}`}>
             <div className="conversation-messages" ref={messagesRef} onScroll={updateScrollBottomVisibility}>
               {/* Bot 实时事件 */}
               {activeSessionId && (
@@ -2037,15 +2268,14 @@ export default function Conversations() {
                   </div>
                 </div>
               )}
-              {messages.length === 0 && !isSessionDetailLoading && !sessionLoadError && !isStreaming && (
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-muted)' }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: '2em' }}>🤖</div>
-                    <div style={{ fontWeight: 600 }}>{currentAgent?.name}</div>
-                    <div style={{ fontSize: '.82em', maxWidth: 300 }}>
-                      {currentAgent?.systemPrompt?.slice(0, 80) || '发送消息开始对话'}
-                    </div>
+              {isWelcomeState && (
+                <div className="conversation-hero">
+                  <div className="conversation-hero-title">
+                    {currentAgent?.name ? `和 ${currentAgent.name} 聊聊` : '开始新的对话'}
                   </div>
+                  {currentAgent?.systemPrompt && (
+                    <div className="conversation-hero-subtitle">{currentAgent.systemPrompt.slice(0, 100)}</div>
+                  )}
                 </div>
               )}
               {messages.map((msg, i) => (
@@ -2084,13 +2314,6 @@ export default function Conversations() {
                     结构化输出 (outputSchema)
                   </div>
                   <JsonViewer data={structuredOutput} maxHeight={300} />
-                </div>
-              )}
-              {observedRunStats && !isStreaming && (
-                <div style={{ textAlign: 'right', fontSize: '.72em', color: 'var(--ink-muted)', padding: '2px 4px' }}>
-                  {observedRunStats.durationMs != null && <span>{(observedRunStats.durationMs / 1000).toFixed(1)}s</span>}
-                  {observedRunStats.inTok != null && <span style={{ marginLeft: 8 }}>{observedRunStats.inTok}↑ {observedRunStats.outTok ?? 0}↓ tok</span>}
-                  {observedRunStats.costUsd != null && <span style={{ marginLeft: 8 }}>${observedRunStats.costUsd.toFixed(4)}</span>}
                 </div>
               )}
               <div ref={bottomRef} />
@@ -2132,28 +2355,30 @@ export default function Conversations() {
 
             {/* 输入区域 */}
             <div className="conversation-composer">
-              <div className="chat-input-area" style={{ padding: 0, borderTop: 'none' }}>
+              <div className="chat-input-area conversation-composer-shell">
                 {(attachments.length > 0 || attachmentError) && (
-                  <div style={{ padding: '4px 8px' }}>
-                    {attachmentError && <div style={{ color: 'var(--danger)', fontSize: '.75em', marginBottom: 4 }}>{attachmentError}</div>}
+                  <div className="composer-attachments">
+                    {attachmentError && <div className="composer-attachment-error">{attachmentError}</div>}
                     {attachments.length > 0 && (
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      <div className="composer-attachment-list">
                         {attachments.map(item => (
-                          <div key={item.id} style={{ position: 'relative' }}>
+                          <div key={item.id} className="composer-attachment-item">
                             {item.type === 'image' ? (
-                              <img src={getChatImageSrc(item)} alt={item.name}
-                                style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 4, border: '1px solid var(--border)' }} />
+                              <img className="composer-attachment-image" src={getChatImageSrc(item)} alt={item.name} />
                             ) : (
                               <div
-                                className="badge badge-info"
+                                className="badge badge-info composer-attachment-file"
                                 title={`${item.name} · ${formatAttachmentBytes(item.size)}`}
-                                style={{ maxWidth: 220, height: 28, display: 'flex', alignItems: 'center', paddingRight: 22, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                               >
                                 {item.name} · {formatAttachmentBytes(item.size)}
                               </div>
                             )}
-                            <button onClick={() => setAttachments(prev => prev.filter(a => a.id !== item.id))}
-                              style={{ position: 'absolute', top: -4, right: -4, width: 16, height: 16, borderRadius: '50%', background: 'var(--danger)', color: '#fff', border: 'none', cursor: 'pointer', fontSize: 10, lineHeight: '16px', padding: 0 }}>
+                            <button
+                              type="button"
+                              className="composer-attachment-remove"
+                              onClick={() => setAttachments(prev => prev.filter(a => a.id !== item.id))}
+                              aria-label="移除附件"
+                            >
                               ×
                             </button>
                           </div>
@@ -2170,44 +2395,77 @@ export default function Conversations() {
                   onChange={e => void handleFilePicked(e.currentTarget.files)}
                   style={{ display: 'none' }}
                 />
-                <button
-                  className="btn"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreaming || isSessionDetailLoading}
-                  title="上传文件"
-                  aria-label="上传文件"
-                  style={{ width: 34, height: 34, minWidth: 34, padding: 0, borderRadius: 6, fontSize: 20, lineHeight: '30px' }}
-                >
-                  +
-                </button>
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'; }}
-                  onKeyDown={e => {
-                    const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-                    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
-                      e.preventDefault();
-                      void handleSend();
-                    }
-                  }}
-                  onCompositionStart={() => { isInputComposingRef.current = true; }}
-                  onCompositionEnd={() => { isInputComposingRef.current = false; }}
-                  onPaste={handlePaste}
-                  placeholder="输入消息，Enter 发送，Shift+Enter 换行，可粘贴图片，也可上传文件"
-                  style={{ resize: 'none', overflowY: 'hidden', minHeight: 38, maxHeight: 200 }}
-                  disabled={isStreaming || isSessionDetailLoading}
-                />
-                {isStreaming ? (
-                  <button className="btn btn-danger" onClick={handleStop}>
-                    {isWaitingPhase(runPhase) ? '停止等待' : '停止'}
-                  </button>
-                ) : (
-                  <button className="btn btn-primary" onClick={handleSend} disabled={isSessionDetailLoading || (!input.trim() && attachments.length === 0)}>
-                    发送
-                  </button>
-                )}
+                <div className="conversation-composer-input-row">
+                  <textarea
+                    ref={textareaRef}
+                    className="conversation-composer-input"
+                    value={input}
+                    onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'; }}
+                    onKeyDown={e => {
+                      const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                      if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
+                        e.preventDefault();
+                        void handleSend();
+                      }
+                    }}
+                    onCompositionStart={() => { isInputComposingRef.current = true; }}
+                    onCompositionEnd={() => { isInputComposingRef.current = false; }}
+                    onPaste={handlePaste}
+                    placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+                    disabled={isStreaming || isSessionDetailLoading}
+                  />
+                </div>
+                <div className="conversation-composer-toolbar">
+                  <div className="composer-toolbar-left">
+                    <button
+                      type="button"
+                      className="composer-icon-btn"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isStreaming || isSessionDetailLoading}
+                      title="上传文件"
+                      aria-label="上传文件"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div className="composer-toolbar-right">
+                    {currentAgent && (
+                      <div className="composer-model-picker">
+                        <ChatModelPicker
+                          value={effectiveModel}
+                          templateModel={currentAgent.model}
+                          models={modelOptions}
+                          disabled={isStreaming}
+                          onChange={model => setSelectedModelOverride({ contextKey: modelContextKey, model })}
+                        />
+                      </div>
+                    )}
+                    {isStreaming ? (
+                      <button
+                        type="button"
+                        className="composer-send-btn is-stop"
+                        onClick={handleStop}
+                        title={isWaitingPhase(runPhase) ? '停止等待' : '停止'}
+                        aria-label={isWaitingPhase(runPhase) ? '停止等待' : '停止'}
+                      >
+                        <span aria-hidden="true">■</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="composer-send-btn"
+                        onClick={handleSend}
+                        disabled={isSessionDetailLoading || (!input.trim() && attachments.length === 0)}
+                        title="发送"
+                        aria-label="发送"
+                      >
+                        <span aria-hidden="true">↑</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
+            </div>
             </div>
           </>
         )}

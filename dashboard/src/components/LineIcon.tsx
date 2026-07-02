@@ -19,6 +19,12 @@ export type LineIconName =
   | 'menu'
   | 'x'
   | 'bolt'
+  | 'pin'
+  | 'radio'
+  | 'image'
+  | 'copy'
+  | 'trash'
+  | 'sliders'
   | 'expand'
   | 'collapse'
   | 'chevronLeft'
@@ -102,6 +108,48 @@ const paths: Record<LineIconName, ReactNode> = {
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
   x: <path d="M6 6l12 12M18 6 6 18" />,
   bolt: <path d="M13 2 4 14h7l-1 8 9-12h-7z" />,
+  pin: (
+    <>
+      <path d="M12 17v5" />
+      <path d="M8 3h8l-1 6 3 3v2H6v-2l3-3z" />
+    </>
+  ),
+  radio: (
+    <>
+      <circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none" />
+      <path d="M8.5 15.5a5 5 0 0 1 7 0" />
+      <path d="M5.5 12.5a9 9 0 0 1 13 0" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <circle cx="9" cy="10" r="1.4" />
+      <path d="M20 15l-4.2-4.2a2 2 0 0 0-2.8 0L6 18" />
+    </>
+  ),
+  copy: (
+    <>
+      <rect x="8" y="8" width="11" height="11" rx="2" />
+      <path d="M5 15H4a1 1 0 0 1-1-1V5a2 2 0 0 1 2-2h9a1 1 0 0 1 1 1v1" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4 7h16" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M6 7l1 14h10l1-14" />
+      <path d="M9 7V4h6v3" />
+    </>
+  ),
+  sliders: (
+    <>
+      <path d="M4 7h7M15 7h5" />
+      <circle cx="13" cy="7" r="2" />
+      <path d="M4 17h5M13 17h7" />
+      <circle cx="11" cy="17" r="2" />
+    </>
+  ),
   expand: (
     <>
       <path d="M8 4H4v4" />
