@@ -1,12 +1,14 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import sharp from 'sharp';
 import readXlsxFile from 'read-excel-file/node';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { AgentDefinition, EffortLevel, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import {
   addTeamMember,
@@ -97,12 +99,13 @@ import {
 import { listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, outcomeToMessageStatus, type RunOutcome } from './src/simulator/run-state.ts';
 
+const execFileAsync = promisify(execFile);
 const app = express();
 app.use(cors({ origin: true }));
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use((error: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (error?.type === 'entity.too.large') {
-    res.status(413).json({ error: '上传内容超过限制，单次最多上传 20MB 文本文件' });
+    res.status(413).json({ error: '上传内容超过限制，请减少图片或文件后重试' });
     return;
   }
   if (error instanceof SyntaxError && 'body' in error) {
@@ -1252,17 +1255,32 @@ type ChatFileInput = {
   data: string;
   size: number;
 };
+type MulterFilesRequest = express.Request & {
+  files?: Express.Multer.File[];
+};
 
 const CHAT_IMAGE_MIME_TYPES = new Set<ChatImageMimeType>(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const CHAT_FILE_EXTENSIONS = new Set([
   '.md', '.markdown', '.txt', '.csv', '.json', '.yaml', '.yml', '.xml', '.html',
   '.svg', '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.go', '.rs', '.sql', '.log', '.xls', '.xlsx',
 ]);
+const CHAT_IMAGE_UPLOAD_EXTENSIONS = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.avif', '.bmp', '.tif', '.tiff',
+]);
 const MAX_CHAT_IMAGES = 4;
 const MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_CHAT_IMAGE_UPLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_CHAT_FILES = 6;
 const MAX_CHAT_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_CHAT_FILE_TEXT_CHARS = 40_000;
+const chatImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: MAX_CHAT_IMAGES,
+    fileSize: MAX_CHAT_IMAGE_UPLOAD_BYTES,
+    fields: 20,
+  },
+});
 const chatFileUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -1309,6 +1327,99 @@ function normalizeChatFileName(value: unknown) {
 
 function isSupportedChatFileName(name: string) {
   return CHAT_FILE_EXTENSIONS.has(path.extname(name).toLowerCase());
+}
+
+function isLikelyChatImageUpload(file: Express.Multer.File) {
+  const extension = path.extname(file.originalname || '').toLowerCase();
+  return String(file.mimetype || '').toLowerCase().startsWith('image/')
+    || CHAT_IMAGE_UPLOAD_EXTENSIONS.has(extension);
+}
+
+function normalizeChatImageOutputName(value: unknown) {
+  const name = normalizeChatFileName(value) || 'image';
+  const parsed = path.parse(name);
+  const base = (parsed.name || 'image')
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100) || 'image';
+  return `${base}.jpg`;
+}
+
+async function jpegWithinChatLimit(source: Buffer) {
+  let lastOutput: Buffer | null = null;
+  for (const maxEdge of [2400, 2048, 1600, 1280, 1024, 800]) {
+    for (const quality of [86, 78, 70, 62, 54]) {
+      const output = await sharp(source, {
+        animated: false,
+        limitInputPixels: 100_000_000,
+      })
+        .rotate()
+        .resize({
+          width: maxEdge,
+          height: maxEdge,
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
+        .flatten({ background: '#ffffff' })
+        .jpeg({ quality, mozjpeg: true })
+        .toBuffer();
+      lastOutput = output;
+      if (output.byteLength <= MAX_CHAT_IMAGE_BYTES) return output;
+    }
+  }
+  if (lastOutput && lastOutput.byteLength <= MAX_CHAT_IMAGE_BYTES) return lastOutput;
+  throw new Error('图片太大，无法压缩到可识别范围');
+}
+
+async function convertImageWithSips(buffer: Buffer, originalName: string) {
+  if (process.platform !== 'darwin') throw new Error('sips is only available on macOS');
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'agentma-image-'));
+  const extension = path.extname(originalName).toLowerCase();
+  const safeExtension = CHAT_IMAGE_UPLOAD_EXTENSIONS.has(extension) ? extension : '.img';
+  const inputPath = path.join(tmpDir, `input${safeExtension}`);
+  const outputPath = path.join(tmpDir, 'output.jpg');
+  try {
+    await fs.promises.writeFile(inputPath, buffer, { mode: 0o600 });
+    await execFileAsync('/usr/bin/sips', [
+      '-s', 'format', 'jpeg',
+      '-s', 'formatOptions', '85',
+      '-Z', '2400',
+      inputPath,
+      '--out',
+      outputPath,
+    ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+    return jpegWithinChatLimit(await fs.promises.readFile(outputPath));
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function chatImageUploadToAttachment(file: Express.Multer.File): Promise<ChatImageInput> {
+  if (!isLikelyChatImageUpload(file)) throw new Error('这张图片无法读取，请换一张');
+  let output: Buffer;
+  try {
+    output = await jpegWithinChatLimit(file.buffer);
+  } catch (sharpError) {
+    try {
+      output = await convertImageWithSips(file.buffer, file.originalname || 'image');
+    } catch {
+      console.warn('[chat-image-upload] conversion failed', {
+        name: file.originalname,
+        mimetype: file.mimetype,
+        size: file.size,
+        error: (sharpError as Error).message,
+      });
+      throw new Error('这张图片无法读取，请换一张');
+    }
+  }
+  return {
+    id: crypto.randomUUID(),
+    name: normalizeChatImageOutputName(file.originalname),
+    mediaType: 'image/jpeg',
+    data: output.toString('base64'),
+    size: output.byteLength,
+  };
 }
 
 async function chatFileToPromptBlock(file: ChatFileInput) {
@@ -1364,7 +1475,7 @@ async function normalizeChatAttachments(value: unknown): Promise<{ images: ChatI
       `### ${name}`,
       `type: ${mediaType}`,
       '',
-      `这个图片附件格式为 ${mediaType}，当前图片通道仅支持 PNG、JPEG、GIF、WebP。请转换格式后可进行视觉分析。`,
+      '这张图片无法读取，请重新上传或换一张图片。',
     ].join('\n'));
   }
   for (const item of fileItems) {
@@ -1409,8 +1520,45 @@ function parseChatFileUpload(req: express.Request, res: express.Response, next: 
   });
 }
 
-app.post('/api/chat/files/upload', authMiddleware, parseChatFileUpload, (req: any, res) => {
-  const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
+function parseChatImageUpload(req: express.Request, res: express.Response, next: express.NextFunction) {
+  chatImageUpload.array('images', MAX_CHAT_IMAGES)(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+    if (error instanceof multer.MulterError) {
+      const message = error.code === 'LIMIT_FILE_SIZE'
+        ? '这张图片太大，无法上传'
+        : error.code === 'LIMIT_FILE_COUNT'
+          ? `最多一次发送 ${MAX_CHAT_IMAGES} 张图片`
+          : '这张图片无法读取，请换一张';
+      res.status(400).json({ error: message });
+      return;
+    }
+    res.status(400).json({ error: (error as Error).message || '图片上传失败' });
+  });
+}
+
+app.post('/api/chat/images/upload', authMiddleware, parseChatImageUpload, async (req: MulterFilesRequest, res) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!files.length) { res.status(400).json({ error: '请选择要上传的图片' }); return; }
+  if (files.length > MAX_CHAT_IMAGES) { res.status(400).json({ error: `最多一次发送 ${MAX_CHAT_IMAGES} 张图片` }); return; }
+
+  try {
+    const images = await Promise.all(files.map(chatImageUploadToAttachment));
+    res.json({
+      attachments: images.map((image) => ({
+        ...image,
+        type: 'image',
+      })),
+    });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || '这张图片无法读取，请换一张' });
+  }
+});
+
+app.post('/api/chat/files/upload', authMiddleware, parseChatFileUpload, (req: MulterFilesRequest, res) => {
+  const files = Array.isArray(req.files) ? req.files : [];
   if (!files.length) { res.status(400).json({ error: '请选择要上传的文件' }); return; }
   if (files.length > MAX_CHAT_FILES) { res.status(400).json({ error: `最多一次上传 ${MAX_CHAT_FILES} 个文件` }); return; }
 

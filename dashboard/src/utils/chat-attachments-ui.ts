@@ -1,4 +1,5 @@
 import type { ChatAttachment, ChatFileAttachment, ChatImageAttachment, ChatImageMimeType } from '../simulator/types';
+import { getAuthHeaders } from './client-runtime';
 
 export const CHAT_IMAGE_MIME_TYPES = new Set<ChatImageMimeType>(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 export const CHAT_IMAGE_MAX_COUNT = 4;
@@ -9,7 +10,12 @@ export const CHAT_FILE_EXTENSIONS = [
   '.md', '.markdown', '.txt', '.csv', '.json', '.yaml', '.yml', '.xml', '.html',
   '.svg', '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.go', '.rs', '.sql', '.log', '.xls', '.xlsx',
 ];
+export const CHAT_IMAGE_INPUT_EXTENSIONS = [
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.avif', '.bmp', '.tif', '.tiff',
+];
 export const CHAT_FILE_ACCEPT = CHAT_FILE_EXTENSIONS.join(',');
+export const CHAT_IMAGE_ACCEPT = ['image/*', ...CHAT_IMAGE_INPUT_EXTENSIONS].join(',');
+export const CHAT_ATTACHMENT_ACCEPT = [CHAT_IMAGE_ACCEPT, CHAT_FILE_ACCEPT].join(',');
 
 export function formatAttachmentBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -39,15 +45,46 @@ export function isSupportedChatFile(file: File) {
   return CHAT_FILE_EXTENSIONS.some((extension) => name.endsWith(extension));
 }
 
+export function isLikelyChatImageFile(file: File) {
+  const name = file.name.toLowerCase();
+  return file.type.toLowerCase().startsWith('image/')
+    || CHAT_IMAGE_INPUT_EXTENSIONS.some((extension) => name.endsWith(extension));
+}
+
 export function uniqueChatImageFiles(files: File[]) {
   const seen = new Set<string>();
   return files.flatMap((file) => {
-    if (!file.type.startsWith('image/')) return [];
-    const key = `${file.type}:${file.size}:${file.lastModified || 0}`;
+    if (!isLikelyChatImageFile(file)) return [];
+    const key = `${file.name}:${file.type}:${file.size}:${file.lastModified || 0}`;
     if (seen.has(key)) return [];
     seen.add(key);
     return [file];
   });
+}
+
+export function splitChatUploadFiles(files: File[]) {
+  const images: File[] = [];
+  const filesOnly: File[] = [];
+  for (const file of files) {
+    if (isLikelyChatImageFile(file)) images.push(file);
+    else filesOnly.push(file);
+  }
+  return { images, files: filesOnly };
+}
+
+export async function uploadChatImages(files: File[]): Promise<ChatImageAttachment[]> {
+  if (!files.length) return [];
+  const formData = new FormData();
+  for (const file of files) formData.append('images', file, file.name || 'image');
+  const response = await fetch('/api/chat/images/upload', {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: formData,
+  });
+  const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
+  if (!response.ok) throw new Error(data.error || `图片上传失败: ${response.status}`);
+  return (Array.isArray(data.attachments) ? data.attachments : [])
+    .filter((item): item is ChatImageAttachment => item.type === 'image');
 }
 
 export async function fileToChatAttachment(file: File): Promise<ChatAttachment> {

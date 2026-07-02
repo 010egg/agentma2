@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { ClipboardEvent } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import type { AgentTemplate, ChatAttachment, ChatMessage, ChatRunStats, ChatSession, ProviderConfig, ChatImageMimeType } from '../simulator/types';
+import type { AgentTemplate, ChatAttachment, ChatMessage, ChatRunStats, ChatSession, ProviderConfig } from '../simulator/types';
 import { useAuth } from '../contexts/AuthContext';
 import { bootstrapAgentTemplates, getCachedAgentTemplateById } from '../utils/agent-templates';
 import { isUsingApiKeyAuth, getAuthHeaders } from '../utils/client-runtime';
@@ -39,14 +39,14 @@ import {
   type RunOutcome,
 } from '../simulator/run-state';
 import {
-  CHAT_FILE_ACCEPT,
+  CHAT_ATTACHMENT_ACCEPT,
   CHAT_FILE_MAX_COUNT,
   CHAT_IMAGE_MAX_COUNT,
-  CHAT_IMAGE_MIME_TYPES,
-  fileToChatAttachment,
   formatAttachmentBytes,
   getChatImageSrc,
+  splitChatUploadFiles,
   uniqueChatImageFiles,
+  uploadChatImages,
 } from '../utils/chat-attachments-ui';
 
 async function readChatError(response: Response) {
@@ -428,41 +428,66 @@ export default function AgentChat() {
   };
 
   const handleFilePicked = useCallback(async (fileList: FileList | null) => {
-    const files = Array.from(fileList || []);
+    const pickedFiles = Array.from(fileList || []);
     if (fileInputRef.current) fileInputRef.current.value = '';
-    if (!files.length) return;
+    if (!pickedFiles.length) return;
     setAttachmentError('');
+    const { images, files } = splitChatUploadFiles(pickedFiles);
 
+    const imageCount = attachments.filter((item) => item.type === 'image').length;
+    const remainingImages = CHAT_IMAGE_MAX_COUNT - imageCount;
     const currentFileCount = attachments.filter((item) => item.type === 'file').length;
     const remainingFiles = CHAT_FILE_MAX_COUNT - currentFileCount;
-    if (remainingFiles <= 0) {
+    if (images.length > 0 && remainingImages <= 0) {
+      setAttachmentError(`最多一次发送 ${CHAT_IMAGE_MAX_COUNT} 张图片`);
+      return;
+    }
+    if (files.length > 0 && remainingFiles <= 0) {
       setAttachmentError(`最多一次发送 ${CHAT_FILE_MAX_COUNT} 个文件`);
       return;
     }
 
-    const accepted = files.slice(0, remainingFiles);
+    const acceptedImages = images.slice(0, remainingImages);
+    const acceptedFiles = files.slice(0, remainingFiles);
+    if (images.length > remainingImages) setAttachmentError(`最多一次发送 ${CHAT_IMAGE_MAX_COUNT} 张图片`);
     if (files.length > remainingFiles) setAttachmentError(`最多一次发送 ${CHAT_FILE_MAX_COUNT} 个文件`);
-    try {
-      const formData = new FormData();
-      for (const file of accepted) formData.append('files', file, file.name);
-      const response = await fetch('/api/chat/files/upload', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: formData,
-      });
-      const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
-      if (!response.ok) throw new Error(data.error || `上传失败: ${response.status}`);
-      const nextAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+    const nextAttachments: ChatAttachment[] = [];
+    const errors: string[] = [];
+    if (acceptedImages.length) {
+      try {
+        nextAttachments.push(...await uploadChatImages(acceptedImages));
+      } catch (error) {
+        errors.push((error as Error).message || '图片上传失败');
+      }
+    }
+    if (acceptedFiles.length) {
+      try {
+        const formData = new FormData();
+        for (const file of acceptedFiles) formData.append('files', file, file.name);
+        const response = await fetch('/api/chat/files/upload', {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: formData,
+        });
+        const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
+        if (!response.ok) throw new Error(data.error || `上传失败: ${response.status}`);
+        nextAttachments.push(...(Array.isArray(data.attachments) ? data.attachments : []));
+      } catch (error) {
+        errors.push((error as Error).message || '文件上传失败');
+      }
+    }
+    if (nextAttachments.length) {
       setAttachments(prev => [...prev, ...nextAttachments]);
-    } catch (error) {
-      setAttachmentError((error as Error).message || '文件读取失败');
+    }
+    if (errors.length) {
+      setAttachmentError(errors[0]);
     }
   }, [attachments]);
 
   const handlePaste = useCallback(async (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(event.clipboardData?.items || []);
     const files = uniqueChatImageFiles(items
-      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .filter(item => item.kind === 'file')
       .map(item => item.getAsFile())
       .filter((file): file is File => Boolean(file)));
     if (!files.length) return;
@@ -475,19 +500,17 @@ export default function AgentChat() {
       setAttachmentError(`最多一次发送 ${CHAT_IMAGE_MAX_COUNT} 张图片`);
       return;
     }
-    const accepted = files
-      .filter(file => CHAT_IMAGE_MIME_TYPES.has(file.type as ChatImageMimeType))
-      .slice(0, remainingSlots);
+    const accepted = files.slice(0, remainingSlots);
     if (!accepted.length) {
-      setAttachmentError('不支持这种图片格式；普通文件请用 + 上传');
+      setAttachmentError('这张图片无法读取，请换一张');
       return;
     }
     if (files.length > remainingSlots) setAttachmentError(`最多一次发送 ${CHAT_IMAGE_MAX_COUNT} 张图片`);
     try {
-      const nextAttachments = await Promise.all(accepted.map(fileToChatAttachment));
+      const nextAttachments = await uploadChatImages(accepted);
       setAttachments(prev => [...prev, ...nextAttachments]);
     } catch (error) {
-      setAttachmentError((error as Error).message || '图片读取失败');
+      setAttachmentError((error as Error).message || '图片上传失败');
     }
   }, [attachments]);
 
@@ -981,7 +1004,7 @@ export default function AgentChat() {
             ref={fileInputRef}
             type="file"
             multiple
-            accept={CHAT_FILE_ACCEPT}
+            accept={CHAT_ATTACHMENT_ACCEPT}
             onChange={e => void handleFilePicked(e.currentTarget.files)}
             style={{ display: 'none' }}
           />
