@@ -498,7 +498,7 @@ const RUN_CWD_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RUN_CWD_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const AGENT_SEED_MARKER = '.agentma-seeded';
 const BLOCKED_AGENT_SEED_COPY_ENTRIES = new Set(['.git', 'node_modules', '.agent-home', AGENT_SEED_MARKER]);
-const USER_SKILLS_DIR = path.resolve(process.env.AGENTMA_USER_SKILLS_DIR || path.join(os.homedir(), '.claude', 'skills'));
+const USER_SKILLS_ROOT = path.resolve(process.env.AGENTMA_USER_SKILLS_DIR || path.join(os.homedir(), '.claude', 'skills'));
 const SAFE_SKILL_NAME_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 // P1: 给租户 run 的 env 白名单，绝不把宿主全部 process.env 拷进 agent run。
 // 需要额外变量时用 AGENTMA_RUN_ENV_ALLOWLIST 逗号分隔追加，先在 dev 验证不破坏 SDK/MCP。
@@ -525,6 +525,19 @@ function realpathIfPossible(filePath: string) {
   } catch {
     return path.resolve(filePath);
   }
+}
+
+function safeSkillStorageSegment(value: string) {
+  const normalized = value.trim().replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+  return normalized || crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function userSkillsDirForRun(tenantId: string, sub: string) {
+  return path.join(
+    path.resolve(USER_SKILLS_ROOT),
+    safeSkillStorageSegment(tenantId),
+    safeSkillStorageSegment(sub),
+  );
 }
 
 function getRunCwdParents() {
@@ -624,11 +637,16 @@ function copySkillTree(sourceDir: string, destDir: string) {
   }
 }
 
-export function provisionRunSkills(skills: string[] | undefined, cwd: string): SkillProvisionResult {
+export function provisionRunSkills(
+  skills: string[] | undefined,
+  cwd: string,
+  auth?: { tenantId: string; sub: string },
+): SkillProvisionResult {
   const result: SkillProvisionResult = { provisioned: [], issues: [] };
   if (!skills?.length) return result;
 
   const targetRoot = path.resolve(cwd, '.claude', 'skills');
+  const sourceRoot = auth ? userSkillsDirForRun(auth.tenantId, auth.sub) : path.resolve(USER_SKILLS_ROOT);
   for (const rawSkill of skills) {
     const skill = rawSkill.trim();
     if (!skill) continue;
@@ -641,7 +659,7 @@ export function provisionRunSkills(skills: string[] | undefined, cwd: string): S
 
     let sourceDir = '';
     try {
-      sourceDir = fs.realpathSync(path.join(USER_SKILLS_DIR, skill));
+      sourceDir = fs.realpathSync(path.join(sourceRoot, skill));
     } catch { /* 宿主库没有 */ }
 
     if (!sourceDir) {
@@ -1142,7 +1160,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
   // 使用 cwd 下的稳定子目录，保证同一对话跨 run resume 时 HOME 保持稳定。
   const runHome = path.join(cwd, '.agent-home');
   fs.mkdirSync(runHome, { recursive: true });
-  const skillProvision = provisionRunSkills(opts.skills, cwd);
+  const skillProvision = provisionRunSkills(opts.skills, cwd, { tenantId: opts.tenantId, sub: opts.sub });
   const runSkills = skillProvision.provisioned;
   for (const issue of skillProvision.issues) {
     console.warn(`[skill] 未投放 "${issue.skill}": ${issue.reason} (tenant=${opts.tenantId})`);

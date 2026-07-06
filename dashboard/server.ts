@@ -60,6 +60,7 @@ import {
   registerUser,
   removeTeamMember,
   recordLearnedSkill,
+  listLearnedSkills,
   replaceHookRules,
   replaceKnowledgeSources,
   replacePermissionRules,
@@ -269,7 +270,7 @@ const MAX_WORKSPACE_WIKI_FILES = 2000;
 const MAX_WORKSPACE_WIKI_BYTES = 50 * 1024 * 1024;
 const BLOCKED_WORKSPACE_WIKI_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage', '.cache']);
 const WORKSPACE_ROOT = path.resolve(expandLocalPath(process.env.AGENTMA_WORKSPACE_ROOT || path.join(import.meta.dirname, '..')));
-const USER_SKILLS_DIR = path.resolve(expandLocalPath(process.env.AGENTMA_USER_SKILLS_DIR || '~/.claude/skills'));
+const USER_SKILLS_ROOT = path.resolve(expandLocalPath(process.env.AGENTMA_USER_SKILLS_DIR || '~/.claude/skills'));
 const PUBLIC_SKILLS_DIR = path.join(getDataLocation().dataDir, 'public-skills');
 
 type SkillInfoResponse = {
@@ -285,6 +286,12 @@ type SkillInfoResponse = {
   learnedFromPublicRevision?: number;
   learnedAt?: number;
   overwrote?: boolean;
+};
+
+type UploadedSkillCandidate = {
+  skillFile: string;
+  skillDir: string;
+  relativePath: string;
 };
 
 type WorkspaceWikiCandidate = {
@@ -353,14 +360,28 @@ function resolveWorkspaceSkillPath(input: string, workspaceRootPath = WORKSPACE_
   return { skillFile: realSkillFile, skillDir: realSkillDir };
 }
 
-function userSkillInstallDir(skillName: string) {
-  const userSkillsRoot = path.resolve(USER_SKILLS_DIR);
+function safeSkillStorageSegment(value: string) {
+  const normalized = value.trim().replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+  return normalized || crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function userSkillsDirForAuth(auth?: { tenantId: string; sub: string }) {
+  if (!auth) return path.resolve(USER_SKILLS_ROOT);
+  return path.join(
+    path.resolve(USER_SKILLS_ROOT),
+    safeSkillStorageSegment(auth.tenantId),
+    safeSkillStorageSegment(auth.sub),
+  );
+}
+
+function userSkillInstallDir(skillName: string, auth?: { tenantId: string; sub: string }) {
+  const userSkillsRoot = userSkillsDirForAuth(auth);
   const destDir = path.join(userSkillsRoot, skillName);
   if (!isPathInside(destDir, userSkillsRoot)) throw makeHttpError('技能安装路径非法', 400);
   return destDir;
 }
 
-function createWorkspaceSkillInfo(skillFile: string, skillDir: string) {
+function createWorkspaceSkillInfo(skillFile: string, skillDir: string, auth?: { tenantId: string; sub: string }) {
   if (path.basename(skillFile) !== 'SKILL.md') {
     throw makeHttpError('请选择 SKILL.md 文件或包含 SKILL.md 的技能目录', 400);
   }
@@ -373,7 +394,7 @@ function createWorkspaceSkillInfo(skillFile: string, skillDir: string) {
   const title = content.match(/^#\s+(.+)/m)?.[1]?.trim() || '';
   const name = normalizeInstallSkillName(frontmatterName || path.basename(skillDir));
   const description = readFrontmatterValue(content, 'description') || title || `Workspace 技能: ${skillDir}`;
-  const installedPath = userSkillInstallDir(name);
+  const installedPath = userSkillInstallDir(name, auth);
   const installed = fs.existsSync(installedPath);
 
   return {
@@ -410,6 +431,37 @@ function createLocalSkillInfo(skillFile: string, skillDir: string) {
     sourcePath: `${skillDir}${path.sep}`,
     enabled: true,
   };
+}
+
+function listInstalledUserSkills(auth?: { tenantId: string; sub: string }) {
+  const userSkillsDir = userSkillsDirForAuth(auth);
+  fs.mkdirSync(userSkillsDir, { recursive: true });
+  const learnedByName = auth
+    ? new Map(listLearnedSkills(auth.tenantId, auth.sub).map((item) => [item.skillName, item]))
+    : new Map();
+  const found: Array<{ skillFile: string; skillDir: string }> = [];
+  collectLocalSkillDirs(userSkillsDir, 0, found);
+  const deduped = Array.from(new Map<string, { skillFile: string; skillDir: string }>(found.map((item): [string, { skillFile: string; skillDir: string }] => {
+    const skillFile = fs.realpathSync(item.skillFile);
+    const skillDir = fs.realpathSync(item.skillDir);
+    return [skillFile, { skillFile, skillDir }];
+  })).values());
+  return deduped.map(({ skillFile, skillDir }) => {
+    const base = createLocalSkillInfo(skillFile, skillDir);
+    const installedName = path.basename(skillDir).trim() || base.name;
+    const learned = learnedByName.get(installedName);
+    return {
+      ...base,
+      name: installedName,
+      path: `${skillDir}${path.sep}`,
+      sourcePath: `${skillDir}${path.sep}`,
+      installedPath: `${skillDir}${path.sep}`,
+      installed: true,
+      learnedFromPublicSkillId: learned?.publicSkillId,
+      learnedFromPublicRevision: learned?.publicRevision,
+      learnedAt: learned?.learnedAt,
+    };
+  });
 }
 
 function normalizeInstallSkillName(value: string) {
@@ -494,13 +546,14 @@ function copySkillDirSafe(sourceDir: string, destDir: string) {
 function installSkillDirToUserBackpack(
   skillFile: string,
   skillDir: string,
-  options: { nameOverride?: string; overwrite?: boolean } = {},
+  options: { nameOverride?: string; overwrite?: boolean; auth?: { tenantId: string; sub: string } } = {},
 ) {
   const skill = createInstallSkillInfo(skillFile, skillDir, options);
   const installStats = validateSkillInstallTree(skillDir);
 
-  fs.mkdirSync(USER_SKILLS_DIR, { recursive: true });
-  const userSkillsRoot = fs.realpathSync(USER_SKILLS_DIR);
+  const userSkillsDir = userSkillsDirForAuth(options.auth);
+  fs.mkdirSync(userSkillsDir, { recursive: true });
+  const userSkillsRoot = fs.realpathSync(userSkillsDir);
   const destDir = path.join(userSkillsRoot, skill.name);
   if (!isPathInside(destDir, userSkillsRoot)) throw makeHttpError('技能安装路径非法', 400);
   const destExists = fs.existsSync(destDir);
@@ -527,9 +580,98 @@ function installSkillDirToUserBackpack(
   };
 }
 
-function installWorkspaceSkill(inputPath: string, workspaceRootPath = WORKSPACE_ROOT, options: { overwrite?: boolean } = {}) {
+function installWorkspaceSkill(
+  inputPath: string,
+  workspaceRootPath = WORKSPACE_ROOT,
+  options: { overwrite?: boolean; auth?: { tenantId: string; sub: string } } = {},
+) {
   const { skillFile, skillDir } = resolveWorkspaceSkillPath(inputPath, workspaceRootPath);
   return installSkillDirToUserBackpack(skillFile, skillDir, options);
+}
+
+function safeUploadedSkillPath(input: string) {
+  const raw = input.replace(/\\/g, '/').trim();
+  if (!raw || raw.startsWith('/') || /^[A-Za-z]:($|\/)/.test(raw) || /[\x00-\x1F\x7F]/.test(raw)) return '';
+  const parts = raw.split('/');
+  if (parts.some((part) => part === '..')) return '';
+  const normalizedParts = parts.filter((part) => part && part !== '.');
+  if (!normalizedParts.length) return '';
+  if (normalizedParts.some((part) => part.length > 160)) return '';
+  const normalized = normalizedParts.join('/');
+  if (normalized.length > 1024) return '';
+  return normalized;
+}
+
+function prepareUploadedSkillCandidates(
+  uploadRoot: string,
+  files: Express.Multer.File[],
+  relativePaths: string[],
+) {
+  if (!files.length) throw makeHttpError('请选择要上传的技能文件', 400);
+  const resolvedUploadRoot = path.resolve(uploadRoot);
+  const seenTargets = new Set<string>();
+  let totalBytes = 0;
+
+  for (const [index, file] of files.entries()) {
+    const relativePath = safeUploadedSkillPath(relativePaths[index] || file.originalname || '');
+    if (!relativePath) throw makeHttpError('上传文件路径无效', 400);
+    totalBytes += file.buffer.byteLength;
+    if (totalBytes > MAX_SKILL_INSTALL_BYTES) throw makeHttpError('单次上传总大小不能超过 20MB', 400);
+    const target = path.resolve(path.join(uploadRoot, relativePath));
+    if (!target.startsWith(resolvedUploadRoot + path.sep)) throw makeHttpError('上传文件路径越界', 400);
+    if (seenTargets.has(target)) throw makeHttpError(`上传文件路径重复: ${relativePath}`, 400);
+    seenTargets.add(target);
+  }
+
+  fs.mkdirSync(uploadRoot, { recursive: true });
+  try {
+    for (const [index, file] of files.entries()) {
+      const relativePath = safeUploadedSkillPath(relativePaths[index] || file.originalname || '');
+      const target = path.resolve(path.join(uploadRoot, relativePath));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, file.buffer);
+    }
+
+    const found: UploadedSkillCandidate[] = [];
+    collectUploadedSkillDirs(uploadRoot, 0, uploadRoot, found);
+    if (!found.length) throw makeHttpError('没有找到 SKILL.md', 404);
+    return found;
+  } catch (error) {
+    fs.rmSync(uploadRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function collectUploadedSkillDirs(
+  root: string,
+  depth: number,
+  uploadRoot: string,
+  found: UploadedSkillCandidate[],
+) {
+  if (depth > 4 || found.length >= MAX_LOCAL_SKILL_SCAN_RESULTS) return;
+  const ownSkillFile = path.join(root, 'SKILL.md');
+  if (fs.existsSync(ownSkillFile) && fs.statSync(ownSkillFile).isFile()) {
+    found.push({
+      skillFile: ownSkillFile,
+      skillDir: root,
+      relativePath: path.relative(uploadRoot, root).replace(/\\/g, '/') || '.',
+    });
+    return;
+  }
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (found.length >= MAX_LOCAL_SKILL_SCAN_RESULTS) return;
+    if (!entry.isDirectory()) continue;
+    if (['.git', 'node_modules', 'dist', 'build', '.next', 'coverage', '.cache', '__MACOSX'].includes(entry.name)) continue;
+    collectUploadedSkillDirs(path.join(root, entry.name), depth + 1, uploadRoot, found);
+  }
 }
 
 function collectLocalSkillDirs(root: string, depth: number, found: Array<{ skillFile: string; skillDir: string }>) {
@@ -566,7 +708,11 @@ function resolveWorkspaceInputPath(input: string, workspaceRootPath = WORKSPACE_
   return realPath;
 }
 
-function scanWorkspaceSkills(input: string, workspaceRootPath = WORKSPACE_ROOT) {
+function scanWorkspaceSkills(
+  input: string,
+  workspaceRootPath = WORKSPACE_ROOT,
+  auth?: { tenantId: string; sub: string },
+) {
   const resolved = resolveWorkspaceInputPath(input, workspaceRootPath);
   const stat = fs.statSync(resolved);
   const found: Array<{ skillFile: string; skillDir: string }> = [];
@@ -585,7 +731,7 @@ function scanWorkspaceSkills(input: string, workspaceRootPath = WORKSPACE_ROOT) 
     return [skillFile, { skillFile, skillDir }];
   })).values());
   if (!deduped.length) throw makeHttpError('没有找到 SKILL.md', 404);
-  return deduped.map(({ skillFile, skillDir }) => createWorkspaceSkillInfo(skillFile, skillDir));
+  return deduped.map(({ skillFile, skillDir }) => createWorkspaceSkillInfo(skillFile, skillDir, auth));
 }
 
 function scanLocalSkills(input: string) {
@@ -736,7 +882,7 @@ function resolveWorkspaceRootFromConversation(auth: any, conversationId: string)
 function scanWorkspaceSkillsFromConversation(auth: any, conversationId: string) {
   const workspaceRoot = resolveWorkspaceRootFromConversation(auth, conversationId);
   try {
-    return scanWorkspaceSkills('.claude/skills', workspaceRoot);
+    return scanWorkspaceSkills('.claude/skills', workspaceRoot, { tenantId: auth.tenantId, sub: auth.sub });
   } catch (error) {
     const err = error as Error & { status?: number };
     if (err.status === 404) return [];
@@ -753,10 +899,13 @@ function installWorkspaceSkillFromConversation(
   const name = skillName.trim();
   if (!name) throw makeHttpError('need skill name', 400);
   const workspaceRoot = resolveWorkspaceRootFromConversation(auth, conversationId);
-  const candidates = scanWorkspaceSkills('.claude/skills', workspaceRoot);
+  const candidates = scanWorkspaceSkills('.claude/skills', workspaceRoot, { tenantId: auth.tenantId, sub: auth.sub });
   const match = candidates.find((skill) => skill.name === name);
   if (!match) throw makeHttpError(`对话 workspace 中没有找到技能 "${name}"`, 404);
-  return installWorkspaceSkill(match.sourcePath || match.path, workspaceRoot, options);
+  return installWorkspaceSkill(match.sourcePath || match.path, workspaceRoot, {
+    ...options,
+    auth: { tenantId: auth.tenantId, sub: auth.sub },
+  });
 }
 
 function collectWorkspaceWikiStats(wikiDir: string) {
@@ -976,17 +1125,18 @@ function toPublicSkillResponse(skill: ReturnType<typeof getPublicSkill> extends 
   };
 }
 
-function resolveUserBackpackSkillPath(input: { path?: unknown; name?: unknown }) {
+function resolveUserBackpackSkillPath(auth: { tenantId: string; sub: string }, input: { path?: unknown; name?: unknown }) {
   const rawPath = typeof input.path === 'string' ? input.path.trim() : '';
   const rawName = typeof input.name === 'string' ? input.name.trim() : '';
-  const candidate = rawPath || (rawName ? userSkillInstallDir(normalizeInstallSkillName(rawName)) : '');
+  const userSkillsDir = userSkillsDirForAuth(auth);
+  const candidate = rawPath || (rawName ? userSkillInstallDir(normalizeInstallSkillName(rawName), auth) : '');
   if (!candidate) throw makeHttpError('need path or name', 400);
   if (/^https?:\/\//i.test(candidate)) {
     throw makeHttpError('只能发布本地技能目录或 SKILL.md 文件', 400);
   }
 
-  fs.mkdirSync(USER_SKILLS_DIR, { recursive: true });
-  const { skillFile, skillDir } = resolveLocalSkillPath(candidate, rawPath ? WORKSPACE_ROOT : USER_SKILLS_DIR);
+  fs.mkdirSync(userSkillsDir, { recursive: true });
+  const { skillFile, skillDir } = resolveLocalSkillPath(candidate, rawPath ? WORKSPACE_ROOT : userSkillsDir);
   if (fs.lstatSync(skillDir).isSymbolicLink() || fs.lstatSync(skillFile).isSymbolicLink()) {
     throw makeHttpError('技能发布源不能是符号链接', 400);
   }
@@ -1032,7 +1182,7 @@ function resolvePublicBundleSkillPath(publicSkill: NonNullable<ReturnType<typeof
 }
 
 function publishPublicSkillFromBackpack(auth: { tenantId: string; sub: string }, body: Record<string, unknown>) {
-  const { skillFile, skillDir } = resolveUserBackpackSkillPath({ path: body.path, name: body.skillName || body.name });
+  const { skillFile, skillDir } = resolveUserBackpackSkillPath(auth, { path: body.path, name: body.skillName || body.name });
   const skill = createInstallSkillInfo(skillFile, skillDir);
   const displayName = String(body.displayName || body.name || skill.name).trim().slice(0, 100) || skill.name;
   const description = String(body.description || skill.description).trim().slice(0, 500) || skill.description;
@@ -1071,7 +1221,7 @@ function updatePublicSkillFromBackpack(
   let sourcePath: string | undefined;
   let publishStats: ReturnType<typeof validateSkillInstallTree> | undefined;
   if (hasBundleUpdate) {
-    const { skillFile, skillDir } = resolveUserBackpackSkillPath({ path: body.path, name: body.skillName });
+    const { skillFile, skillDir } = resolveUserBackpackSkillPath(auth, { path: body.path, name: body.skillName });
     createInstallSkillInfo(skillFile, skillDir);
     revision = current.revision + 1;
     bundlePath = publicSkillBundleDir(current.id, revision);
@@ -1099,7 +1249,7 @@ function learnPublicSkillIntoBackpack(auth: { tenantId: string; sub: string }, i
   if (!publicSkill) throw makeHttpError('公共技能不存在', 404);
   const { skillFile, skillDir } = resolvePublicBundleSkillPath(publicSkill);
   const nameOverride = typeof body.nameOverride === 'string' ? body.nameOverride.trim() : '';
-  const installed = installSkillDirToUserBackpack(skillFile, skillDir, { nameOverride });
+  const installed = installSkillDirToUserBackpack(skillFile, skillDir, { nameOverride, auth });
   const learned = recordLearnedSkill({
     tenantId: auth.tenantId,
     ownerSub: auth.sub,
@@ -2544,6 +2694,16 @@ const knowledgeMultipartUpload = multer({
   },
 });
 
+const skillMultipartUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: MAX_SKILL_INSTALL_FILES,
+    fileSize: MAX_SKILL_INSTALL_BYTES,
+    fieldSize: 256 * 1024,
+    fields: 1000,
+  },
+});
+
 function formatUploadBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
   return `${Math.round((bytes / 1024 / 1024) * 10) / 10}MB`;
@@ -2990,6 +3150,25 @@ function parseKnowledgeMultipartUpload(req: express.Request, res: express.Respon
       return;
     }
     res.status(400).json({ error: (error as Error).message || '上传知识库失败' });
+  });
+}
+
+function parseSkillMultipartUpload(req: express.Request, res: express.Response, next: express.NextFunction) {
+  skillMultipartUpload.array('files', MAX_SKILL_INSTALL_FILES)(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+    if (error instanceof multer.MulterError) {
+      const message = error.code === 'LIMIT_FILE_SIZE'
+        ? `单个文件不能超过 ${formatUploadBytes(MAX_SKILL_INSTALL_BYTES)}`
+        : error.code === 'LIMIT_FILE_COUNT'
+          ? `单次最多上传 ${MAX_SKILL_INSTALL_FILES} 个文件`
+          : '上传文件格式无效';
+      res.status(400).json({ error: message });
+      return;
+    }
+    res.status(400).json({ error: (error as Error).message || '上传技能失败' });
   });
 }
 
@@ -3523,6 +3702,15 @@ app.patch('/api/skills/public/:id', authMiddleware, requireAdmin, (req: any, res
   }
 });
 
+app.get('/api/skills', authMiddleware, (req: any, res) => {
+  try {
+    res.json({ skills: listInstalledUserSkills(req.auth) });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '读取技能失败' });
+  }
+});
+
 app.post('/api/skills/scan-local', authMiddleware, (req: any, res) => {
   try {
     const inputPath = typeof req.body?.path === 'string' ? req.body.path : '';
@@ -3546,6 +3734,52 @@ app.post('/api/skills/import-local', authMiddleware, (req: any, res) => {
   }
 });
 
+app.post('/api/skills/upload', authMiddleware, parseSkillMultipartUpload, (req: any, res) => {
+  const uploadId = crypto.randomUUID();
+  const uploadRoot = path.join(getDataLocation().dataDir, 'skill-uploads', req.auth.tenantId, req.auth.sub, uploadId);
+  try {
+    const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
+    const relativePaths = uploadedBodyStrings(req.body?.relativePaths);
+    const overwrite = String(req.body?.overwrite || '').trim() === 'true';
+    const candidates = prepareUploadedSkillCandidates(uploadRoot, files, relativePaths);
+    const installed: SkillInfoResponse[] = [];
+    const failed: string[] = [];
+
+    for (const candidate of candidates) {
+      try {
+        const skill = installSkillDirToUserBackpack(candidate.skillFile, candidate.skillDir, {
+          overwrite,
+          auth: { tenantId: req.auth.tenantId, sub: req.auth.sub },
+        });
+        installed.push(skill);
+        audit(req.auth.tenantId, 'upload_local_skill', req.auth.sub, 'skill', skill.path, {
+          name: skill.name,
+          sourcePath: skill.sourcePath,
+          installedPath: skill.installedPath,
+          installStats: skill.installStats,
+          overwrite,
+          overwrote: skill.overwrote,
+        });
+      } catch (error) {
+        failed.push(`${candidate.relativePath}: ${(error as Error).message}`);
+      }
+    }
+
+    if (!installed.length && failed.length) {
+      const status = failed.some(item => item.includes('已存在技能')) ? 409 : 400;
+      res.status(status).json({ error: failed.join('；') });
+      return;
+    }
+
+    res.json({ skills: installed, failed });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '上传技能失败' });
+  } finally {
+    fs.rmSync(uploadRoot, { recursive: true, force: true });
+  }
+});
+
 app.post('/api/skills/workspace/scan', authMiddleware, (req: any, res) => {
   try {
     const conversationId = typeof req.body?.conversationId === 'string' ? req.body.conversationId : '';
@@ -3554,7 +3788,7 @@ app.post('/api/skills/workspace/scan', authMiddleware, (req: any, res) => {
       return;
     }
     const inputPath = typeof req.body?.path === 'string' ? req.body.path : '';
-    res.json({ skills: scanWorkspaceSkills(inputPath) });
+    res.json({ skills: scanWorkspaceSkills(inputPath, WORKSPACE_ROOT, { tenantId: req.auth.tenantId, sub: req.auth.sub }) });
   } catch (error) {
     const err = error as Error & { status?: number };
     res.status(err.status || 500).json({ error: err.message || '扫描失败' });
@@ -3569,7 +3803,10 @@ app.post('/api/skills/workspace/install', authMiddleware, (req: any, res) => {
     const overwrite = req.body?.overwrite === true;
     const skill = conversationId.trim()
       ? installWorkspaceSkillFromConversation(req.auth, conversationId, skillName, { overwrite })
-      : installWorkspaceSkill(inputPath, WORKSPACE_ROOT, { overwrite });
+      : installWorkspaceSkill(inputPath, WORKSPACE_ROOT, {
+        overwrite,
+        auth: { tenantId: req.auth.tenantId, sub: req.auth.sub },
+      });
     audit(req.auth.tenantId, 'install_workspace_skill', req.auth.sub, 'skill', skill.path, {
       name: skill.name,
       conversationId: conversationId.trim() || undefined,
