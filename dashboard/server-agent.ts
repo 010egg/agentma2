@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { evaluateHookRules, evaluatePermissionRules, listDatasources, listHookRules, listKnowledgeSources, listProtectedSdkCwds, recordAgentRun } from './server-store.ts';
 import type { DatasourceRow, HookRuleEvent } from './server-store.ts';
 import { DATASOURCE_QUERY_MAX_ROWS } from './server-datasource.ts';
+import { buildMemoryMcp, buildMemorySystemPrompt, readMemoryContext } from './server-memory.ts';
 import { buildDatasourceMcp, buildImageInspectMcp, buildModelRequestMcp, listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, type RunOutcome } from './src/simulator/run-state.ts';
 
@@ -1232,6 +1233,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
     ? buildImageInspectMcp(opts.tenantId, cwd, opts.imageInspectModel || opts.visualPreprocess?.model || '')
     : null;
   const uploadedImageGuardEnabled = hasPromptImages || hasAttachmentImages || Boolean(imageInspectMcp);
+  // 跨会话记忆(按 tenant/sub 隔离):always-on,注入已存记忆 + 暴露 remember 工具。
+  const memoryEnabled = Boolean(opts.tenantId && opts.sub);
+  const memoryAuth = { tenantId: opts.tenantId, sub: opts.sub };
+  const memoryMcp = memoryEnabled ? buildMemoryMcp(memoryAuth) : null;
+  const memorySystemPrompt = memoryEnabled ? buildMemorySystemPrompt(readMemoryContext(memoryAuth)) : '';
   const datasourceSystemPrompt = datasources.length ? buildDatasourceSystemPrompt(datasources) : '';
   const skillsSystemPrompt = runSkills.length ? buildSkillsSystemPrompt(runSkills) : '';
   const askUserQuestionSystemPrompt = opts.tools?.includes('AskUserQuestion') ? buildAskUserQuestionSystemPrompt() : '';
@@ -1242,7 +1248,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
   const imageInspectSystemPrompt = imageInspectMcp
     ? '已启用内部工具 image.inspect。用户上传的图片会保存到 workspace 的 attachments/ 下；需要读取图片像素或 OCR 时，调用 mcp__image__inspect，传 imagePath 或 imagePaths。不要使用 file://、WebFetch 或把图片转成大段 base64。model 必须选择账户已配置且已启用的模型名；如果工具页已配置默认模型，可以省略 model。'
     : '';
-  const effectiveSystemPrompt = [opts.systemPrompt, buildRunIsolationSystemPrompt(), knowledgeSystemPrompt, datasourceSystemPrompt, skillsSystemPrompt, askUserQuestionSystemPrompt, toolSearchSystemPrompt, modelRequestSystemPrompt, imageInspectSystemPrompt].filter((part) => part && part.trim()).join('\n\n');
+  const effectiveSystemPrompt = [opts.systemPrompt, buildRunIsolationSystemPrompt(), knowledgeSystemPrompt, datasourceSystemPrompt, skillsSystemPrompt, askUserQuestionSystemPrompt, toolSearchSystemPrompt, modelRequestSystemPrompt, imageInspectSystemPrompt, memorySystemPrompt].filter((part) => part && part.trim()).join('\n\n');
   const nativeMcpServerNames = new Set((opts.mcpServers || []).map((name) => name.trim()).filter((name) => /^[A-Za-z0-9._-]{1,128}$/.test(name)));
   let customNames = new Set<string>();
   if (customMcp) {
@@ -1322,8 +1328,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
     const allowedByNativeMcpServer = toolName.startsWith('mcp__') && Array.from(nativeMcpServerNames).some((serverName) => (
       toolName.startsWith(`mcp__${serverName}__`)
     ));
-    if (templateToolNames.size > 0 && !templateToolNames.has(toolName) && !allowedBySubagentDefinition && !allowedByNativeMcpServer) {
+    const allowedByBuiltinMemory = toolName.startsWith('mcp__memory__');
+    if (templateToolNames.size > 0 && !templateToolNames.has(toolName) && !allowedBySubagentDefinition && !allowedByNativeMcpServer && !allowedByBuiltinMemory) {
       return { behavior: 'deny', message: `Tool '${toolName}' is not enabled by the agent template.` } as PermissionResult;
+    }
+    // 内建记忆工具:写入的是本用户隔离的 memory 目录,自动放行(不弹权限)。
+    if (allowedByBuiltinMemory) {
+      return { behavior: 'allow', updatedInput: input } as PermissionResult;
     }
     const blockedHostPath = hostPathToolBlock(toolName, input, cwd, additionalDirectories);
     if (blockedHostPath) {
@@ -1520,12 +1531,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
         env,
         settings: { showThinkingSummaries: true },
         ...(hooks ? { hooks, includeHookEvents: true } : {}),
-        ...(customMcp || datasourceMcp || modelRequestMcp || imageInspectMcp ? {
+        ...(customMcp || datasourceMcp || modelRequestMcp || imageInspectMcp || memoryMcp ? {
           mcpServers: {
             ...(customMcp ? { custom: customMcp } : {}),
             ...(datasourceMcp ? { datasource: datasourceMcp } : {}),
             ...(modelRequestMcp ? { model: modelRequestMcp } : {}),
             ...(imageInspectMcp ? { image: imageInspectMcp } : {}),
+            ...(memoryMcp ? { memory: memoryMcp } : {}),
           },
         } : {}),
         ...(effectiveSystemPrompt ? { systemPrompt: effectiveSystemPrompt } : {}),

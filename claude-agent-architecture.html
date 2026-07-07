@@ -233,6 +233,7 @@ const MOD={
    {t:'MCP 服务器',in:'yes',where:'customMcp + datasourceMcp + 原生 MCP 白名单',play:['挂 MCP','options: { mcpServers: { datasource } }'],ref:'mcp'},
    {t:'Tool Search',in:'part',where:'SDK 默认开；项目未显式配 ENABLE_TOOL_SEARCH',play:['（默认生效）','env: { ENABLE_TOOL_SEARCH: "auto:5" }'],ref:'tool-search'},
    {t:'Workflow（大批编排）',in:'no',where:'未接 Workflow 工具',play:['未接','options: { allowedTools: ["Workflow"] }'],ref:'subagents'},
+   {t:'Memory 记忆工具 (SDK MCP)',in:'yes',where:'buildMemoryMcp → mcp__memory__remember；always-on(需 tenant+sub),写入本用户隔离 memory 目录(2026-07-07 接)',play:['记忆工具','createSdkMcpServer({ name:"memory", tools:[ remember ] })'],ref:'custom-tools'},
   ]},
  M4s:{title:'子代理',md:'Agent 工具派生隔离子循环。',
   subs:[
@@ -283,6 +284,7 @@ C3:{title:'上下文管理',md:'窗口上限 / 使用占比 / 压缩 / 注入 / 
    {t:'PreCompact 归档 (接管 transcript)',in:'no',where:'未接：roadmap"外层接管 transcript + PreCompact"未落地',play:['未接','hooks: { PreCompact: [{ hooks:[archive] }] }'],ref:'hooks'},
    {t:'注入上下文 (UserPromptSubmit)',in:'no',where:'UserPromptSubmit hook 未接',play:['未接','hooks: { UserPromptSubmit: [{ hooks:[injectCtx] }] }'],ref:'hooks'},
    {t:'上下文隔离 (子代理 fresh context)',in:'yes',where:'子代理全新上下文、只回传摘要 → 省主会话上下文',play:['隔离','options: { agents: {...}, allowedTools: ["Agent"] }'],ref:'subagents'},
+   {t:'跨会话长期记忆 (Memory)',in:'yes',where:'server-memory.ts：per-(tenant,sub) 隔离目录；runAgent 每次把 MEMORY.md+事实注入 memorySystemPrompt；agent 调 mcp__memory__remember 写入,canUseTool 内建放行(2026-07-07 接)',play:['记忆继承','// 每次运行注入已存记忆\noptions:{ systemPrompt:[...,memorySystemPrompt], mcpServers:{ memory } }'],ref:'agent-loop'},
   ]},
  C4:{title:'会话与状态',md:'恢复 / 分支 / 持久化 / 回退。',
   subs:[
