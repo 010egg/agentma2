@@ -3823,6 +3823,26 @@ app.post('/api/skills/workspace/install', authMiddleware, (req: any, res) => {
   }
 });
 
+app.delete('/api/skills/user/:name', authMiddleware, (req: any, res) => {
+  try {
+    const name = normalizeInstallSkillName(String(req.params?.name || ''));
+    const userSkillsRoot = fs.existsSync(USER_SKILLS_DIR)
+      ? fs.realpathSync(USER_SKILLS_DIR)
+      : path.resolve(USER_SKILLS_DIR);
+    const destDir = path.join(userSkillsRoot, name);
+    if (!isPathInside(destDir, userSkillsRoot)) throw makeHttpError('技能路径非法', 400);
+    if (!fs.existsSync(destDir)) throw makeHttpError(`用户背包中不存在技能 "${name}"`, 404);
+    const realDest = fs.realpathSync(destDir);
+    if (!isPathInside(realDest, userSkillsRoot)) throw makeHttpError('技能路径非法', 400);
+    fs.rmSync(realDest, { recursive: true, force: true });
+    audit(req.auth.tenantId, 'delete_user_skill', req.auth.sub, 'skill', `${destDir}${path.sep}`, { name });
+    res.json({ ok: true, name });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '删除失败' });
+  }
+});
+
 // ═══ Agent Templates Routes (personal + published) ═══
 app.get('/api/agents', authMiddleware, (req: any, res) => {
   res.json(listVisibleAgentTemplates(req.auth));

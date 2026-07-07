@@ -959,7 +959,7 @@ export default function AgentChat() {
           </button>
         )}
 
-        <div style={{ padding: '0 12px' }}>
+        <div style={{ padding: '0 12px', maxHeight: '42vh', overflowY: 'auto', flexShrink: 0 }}>
           <AskUserQuestionPromptList
             pending={pendingQuestions}
             onResolved={(reqId) => setPendingQuestions(prev => prev.filter(p => p.reqId !== reqId))}

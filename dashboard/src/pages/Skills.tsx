@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import type { PublicSkillInfo, SkillInfo } from '../simulator/types';
 import { initSkills, saveSkills } from '../simulator/mock-data';
+import { loadCachedAgentTemplates } from '../utils/agent-templates';
 import { useAuth } from '../contexts/AuthContext';
 import { getAuthHeaders } from '../utils/client-runtime';
 import { parseConversationIdInput } from '../utils/conversation-links';
@@ -61,6 +62,54 @@ export default function Skills() {
 
   const toggleSkill = (name: string) => {
     setSkills(prev => prev.map(s => s.name === name ? { ...s, enabled: !s.enabled } : s));
+  };
+
+  // 每个技能被多少个 Agent 模板引用(模板自身 skills + 其 subagents 的 skills,每个模板至多计一次)
+  const skillUsage = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const template of loadCachedAgentTemplates(user?.tenantId)) {
+      const names = new Set<string>();
+      if (Array.isArray(template.skills)) template.skills.forEach(n => names.add(n));
+      if (template.subagents) {
+        for (const sub of Object.values(template.subagents)) {
+          if (Array.isArray(sub.skills)) sub.skills.forEach(n => names.add(n));
+        }
+      }
+      names.forEach(n => counts.set(n, (counts.get(n) || 0) + 1));
+    }
+    return counts;
+  }, [user?.tenantId]);
+
+  const deleteSkill = async (skill: SkillInfo) => {
+    const uses = skillUsage.get(skill.name) || 0;
+    const onDisk = skill.location === 'user';
+    const lines = [
+      onDisk
+        ? `彻底删除技能 "${skill.name}"？将移除磁盘上的 ~/.claude/skills/${skill.name}/，不可恢复。`
+        : `从技能背包移除 "${skill.name}"？（该技能不在用户目录，仅从列表移除，不删除任何文件）`,
+    ];
+    if (uses > 0) lines.push(`⚠ 当前有 ${uses} 个 Agent 引用该技能，删除后它们将失去此能力。`);
+    if (!window.confirm(lines.join('\n\n'))) return;
+
+    if (onDisk) {
+      try {
+        const res = await fetch(`/api/skills/user/${encodeURIComponent(skill.name)}`, {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+        });
+        const data = await res.json().catch(() => ({}));
+        // 404 视为已删除:磁盘已无该目录,继续从列表移除
+        if (!res.ok && res.status !== 404) {
+          setActionMsg({ type: 'error', text: data.error || `删除失败: HTTP ${res.status}` });
+          return;
+        }
+      } catch (e) {
+        setActionMsg({ type: 'error', text: `删除失败: ${(e as Error).message}` });
+        return;
+      }
+    }
+    setSkills(prev => prev.filter(s => s.name !== skill.name));
+    setActionMsg({ type: 'success', text: `已删除技能 "${skill.name}"${onDisk ? '（含磁盘文件）' : ''}。` });
   };
 
   // GitHub 导入
@@ -796,6 +845,11 @@ export default function Skills() {
                           <span className="badge badge-info">公共学习 rev {skill.learnedFromPublicRevision || 1}</span>
                         </div>
                       )}
+                      <div className="mt-2">
+                        <span className={`badge ${(skillUsage.get(skill.name) || 0) > 0 ? 'badge-info' : 'badge-muted'}`}>
+                          {skillUsage.get(skill.name) || 0} 个 Agent 使用
+                        </span>
+                      </div>
                     </div>
                     <div className="flex gap-2" style={{ flexDirection: 'column', alignItems: 'center' }}>
                       <StatusBadge status={skill.enabled ? 'success' : 'disabled'} label={skill.enabled ? '启用' : '禁用'} />
@@ -814,6 +868,13 @@ export default function Skills() {
                           {publishingName === skill.name ? '发布中...' : '发布公共'}
                         </button>
                       )}
+                      <button
+                        className="btn btn-sm"
+                        style={{ color: 'var(--danger)' }}
+                        onClick={() => { void deleteSkill(skill); }}
+                      >
+                        删除
+                      </button>
                     </div>
                   </div>
                 </div>

@@ -25,3 +25,6 @@ spike-sdk/
 .DS_Store
 .idea/
 .vscode/
+
+# 本地 Claude Code 配置(含 settings.local.json,私有)
+.claude/
