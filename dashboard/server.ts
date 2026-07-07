@@ -3826,12 +3826,10 @@ app.post('/api/skills/workspace/install', authMiddleware, (req: any, res) => {
 app.delete('/api/skills/user/:name', authMiddleware, (req: any, res) => {
   try {
     const name = normalizeInstallSkillName(String(req.params?.name || ''));
-    const userSkillsRoot = fs.existsSync(USER_SKILLS_DIR)
-      ? fs.realpathSync(USER_SKILLS_DIR)
-      : path.resolve(USER_SKILLS_DIR);
-    const destDir = path.join(userSkillsRoot, name);
-    if (!isPathInside(destDir, userSkillsRoot)) throw makeHttpError('技能路径非法', 400);
+    // 按用户隔离目录 ~/.claude/skills/<tenant>/<sub>/<name>(userSkillInstallDir 内含 isPathInside 校验)
+    const destDir = userSkillInstallDir(name, req.auth);
     if (!fs.existsSync(destDir)) throw makeHttpError(`用户背包中不存在技能 "${name}"`, 404);
+    const userSkillsRoot = fs.realpathSync(userSkillsDirForAuth(req.auth));
     const realDest = fs.realpathSync(destDir);
     if (!isPathInside(realDest, userSkillsRoot)) throw makeHttpError('技能路径非法', 400);
     fs.rmSync(realDest, { recursive: true, force: true });
