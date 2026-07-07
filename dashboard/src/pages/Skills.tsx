@@ -294,7 +294,7 @@ export default function Skills() {
           ];
         });
       }
-      const failed = Array.isArray(data.failed) ? data.failed.map(item => String(item)) : [];
+      const failed = Array.isArray(data.failed) ? data.failed.map((item: unknown) => String(item)) : [];
       setLocalMsg([
         installed.length ? `✓ 已从你的本机导入 ${installed.length} 个技能` : '',
         failed.length ? `失败 ${failed.length} 个：${failed.join('；')}` : '',
