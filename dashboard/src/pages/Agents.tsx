@@ -189,7 +189,7 @@ function isPublishedAgent(template: AgentTemplate) {
 export default function Agents() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [templates, setTemplates] = useState<AgentTemplate[]>([]);
+  const [templates, setTemplates] = useState<AgentTemplate[]>(() => loadCachedAgentTemplates(user?.tenantId));
   const [form, setForm] = useState<AgentTemplate>(newTemplate());
   const [isEditing, setIsEditing] = useState(false);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -847,7 +847,7 @@ export default function Agents() {
             />
           </div>
 
-          {isLoading ? (
+          {isLoading && templates.length === 0 ? (
             <div className="card" style={{ textAlign: 'center', color: 'var(--ink-muted)', padding: 40 }}>
               加载中...
             </div>

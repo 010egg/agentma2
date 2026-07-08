@@ -52,10 +52,12 @@ import {
   getChatSession,
   getChatSessionDisplayTitle,
   joinChatSession as joinChatSessionApi,
+  loadCachedChatSessionSummaries,
   patchChatSession,
   saveChatSession as saveChatSessionApi,
   setChatSessionCollaboration,
   subscribeChatSessionEvents,
+  writeCachedChatSessionSummaries,
 } from '../utils/chat-sessions';
 
 // MCP 服务状态指示灯（自动 ping 端点）
@@ -234,6 +236,19 @@ function createIdleSessionRunUiState(): SessionRunUiState {
   };
 }
 
+type ChatSessionCacheUser = {
+  tenantId?: string;
+  id?: string;
+  email?: string;
+  username?: string;
+} | null | undefined;
+
+function getChatSessionSummaryCacheScope(user: ChatSessionCacheUser) {
+  const tenantId = user?.tenantId || '';
+  const ownerKey = user?.id || user?.email || user?.username || '';
+  return tenantId && ownerKey ? `${tenantId}:${ownerKey}` : '';
+}
+
 export default function Conversations() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedAgentId = searchParams.get('agent') || '';
@@ -242,8 +257,9 @@ export default function Conversations() {
   const requestedSessionId = searchParams.get('sdkSessionId') || searchParams.get('sessionId') || '';
   const requestedDraft = searchParams.get('draft') || '';
   const { user } = useAuth();
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const chatSessionCacheScope = getChatSessionSummaryCacheScope(user);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => loadCachedChatSessionSummaries(chatSessionCacheScope));
+  const [sessionsLoading, setSessionsLoading] = useState(() => loadCachedChatSessionSummaries(chatSessionCacheScope).length === 0);
   const [sessionsError, setSessionsError] = useState('');
   const [templates, setTemplates] = useState<AgentTemplate[]>(() => loadCachedAgentTemplates(user?.tenantId));
   const [selectedAgentId, setSelectedAgentId] = useState('');
@@ -335,6 +351,18 @@ export default function Conversations() {
   const persistRef = useRef<((msgs: ChatMessage[], sid: string | null, sdkSessionId?: string, sdkCwd?: string, options?: { syncUrl?: boolean }) => Promise<string>) | null>(null);
   const appliedDraftRef = useRef('');
   const appliedConversationRequestRef = useRef('');
+
+  const cacheSessions = useCallback((nextSessions: ChatSession[]) => {
+    writeCachedChatSessionSummaries(chatSessionCacheScope, nextSessions);
+  }, [chatSessionCacheScope]);
+
+  const updateSessions = useCallback((updater: (previous: ChatSession[]) => ChatSession[]) => {
+    setSessions(previous => {
+      const next = updater(previous);
+      cacheSessions(next);
+      return next;
+    });
+  }, [cacheSessions]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -480,12 +508,12 @@ export default function Conversations() {
   }, [searchParams, setSearchParams]);
 
   const upsertSession = useCallback((session: ChatSession) => {
-    setSessions(prev => {
+    updateSessions(prev => {
       const exists = prev.some((item) => item.id === session.id);
       if (!exists) return [session, ...prev];
       return prev.map((item) => item.id === session.id ? session : item);
     });
-  }, []);
+  }, [updateSessions]);
 
   const openSession = useCallback(async (session: ChatSession) => {
     const loadSeq = ++sessionLoadSeqRef.current;
@@ -519,7 +547,7 @@ export default function Conversations() {
       const fullSession = await getChatSession(session.id);
       if (sessionLoadSeqRef.current !== loadSeq) return null;
       if (!fullSession) {
-        setSessions(prev => prev.filter(item => item.id !== session.id));
+        updateSessions(prev => prev.filter(item => item.id !== session.id));
         activeSessionIdRef.current = null;
         setActiveSessionId(null);
         setMessages([]);
@@ -544,7 +572,7 @@ export default function Conversations() {
     } finally {
       if (sessionLoadSeqRef.current === loadSeq) setLoadingSessionId('');
     }
-  }, [syncConversationUrl, templates, upsertSession]);
+  }, [syncConversationUrl, templates, updateSessions, upsertSession]);
 
   // 自动回复
   const doAutoReply = useCallback(async (eventText: string) => {
@@ -873,6 +901,7 @@ export default function Conversations() {
 
   useEffect(() => {
     let cancelled = false;
+
     if (user?.tenantId) {
       const tenantId = user.tenantId;
       setTemplates(loadCachedAgentTemplates(tenantId));
@@ -888,10 +917,14 @@ export default function Conversations() {
     }
 
     (async () => {
-      setSessionsLoading(true);
+      const cachedSessions = loadCachedChatSessionSummaries(chatSessionCacheScope);
+      if (!cancelled) {
+        setSessions(cachedSessions);
+        setSessionsLoading(cachedSessions.length === 0);
+      }
       setSessionsError('');
       try {
-        const savedSessions = await bootstrapChatSessions(!isUsingApiKeyAuth());
+        const savedSessions = await bootstrapChatSessions(!isUsingApiKeyAuth(), chatSessionCacheScope);
         if (!cancelled) setSessions(savedSessions);
       } catch (error) {
         console.error('failed to load chat sessions', error);
@@ -902,7 +935,7 @@ export default function Conversations() {
     })();
 
     return () => { cancelled = true; };
-  }, [user?.tenantId, user?.role]);
+  }, [chatSessionCacheScope, user?.tenantId, user?.role]);
 
   useEffect(() => {
     if (selectedAgentId) return;
@@ -1028,7 +1061,7 @@ export default function Conversations() {
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };
-    setSessions(prev => {
+    updateSessions(prev => {
       const existingSession = prev.find((session) => session.id === id);
       if (existingSession) {
         return prev.map((session) => session.id === id ? { ...draft, createdAt: existingSession.createdAt } : session);
@@ -1038,7 +1071,7 @@ export default function Conversations() {
 
     try {
       const saved = await saveChatSessionApi(draft);
-      setSessions(prev => {
+      updateSessions(prev => {
         const exists = prev.some((session) => session.id === saved.id);
         if (!exists) return [saved, ...prev];
         return prev.map((session) => session.id === saved.id ? saved : session);
@@ -1050,7 +1083,7 @@ export default function Conversations() {
       if (shouldSyncUrl) syncConversationUrl(draft);
       return id;
     }
-  }, [selectedAgentId, currentAgent, sessions, syncConversationUrl, selectedModel, visualPreprocessEnabled, visualPreprocessModel]);
+  }, [selectedAgentId, currentAgent, sessions, syncConversationUrl, selectedModel, updateSessions, visualPreprocessEnabled, visualPreprocessModel]);
 
   // 把 persistSession 存到 ref 供 doAutoReply 使用
   persistRef.current = persistSession;
@@ -1112,7 +1145,7 @@ export default function Conversations() {
   const refreshSession = useCallback(async (sessionId: string) => {
     const refreshed = await getChatSession(sessionId);
     if (!refreshed) {
-      setSessions(prev => prev.filter(session => session.id !== sessionId));
+      updateSessions(prev => prev.filter(session => session.id !== sessionId));
       if (activeSessionId === sessionId) {
         sessionLoadSeqRef.current += 1;
         setLoadingSessionId('');
@@ -1131,7 +1164,7 @@ export default function Conversations() {
       syncConversationUrl(refreshed);
     }
     return refreshed;
-  }, [activeSessionId, upsertSession, syncConversationUrl]);
+  }, [activeSessionId, syncConversationUrl, updateSessions, upsertSession]);
 
   useEffect(() => {
     if (!activeSessionId || !pendingRunMessage?.id || !pendingRunMessage.runId) {
@@ -1234,7 +1267,7 @@ export default function Conversations() {
     return subscribeChatSessionEvents(activeSession.id, (event) => {
       if (event.type === 'connected') return;
       if (event.type === 'session_deleted') {
-        setSessions(prev => prev.filter(session => session.id !== activeSession.id));
+        updateSessions(prev => prev.filter(session => session.id !== activeSession.id));
         sessionLoadSeqRef.current += 1;
         setLoadingSessionId('');
         setSessionLoadError('');
@@ -1249,7 +1282,7 @@ export default function Conversations() {
     }, (error) => {
       console.error('collaboration stream failed', error);
     });
-  }, [activeSession?.id, activeSession?.collaborationEnabled, refreshSession]);
+  }, [activeSession?.id, activeSession?.collaborationEnabled, refreshSession, updateSessions]);
 
   // 编辑标题
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -1263,11 +1296,11 @@ export default function Conversations() {
   const handleRename = async (id: string) => {
     const nextTitle = editTitle.trim();
     if (!nextTitle) return;
-    setSessions(prev => prev.map(s => s.id === id ? { ...s, title: nextTitle } : s));
+    updateSessions(prev => prev.map(s => s.id === id ? { ...s, title: nextTitle } : s));
     setEditingId(null);
     try {
       const saved = await patchChatSession(id, { title: nextTitle });
-      setSessions(prev => prev.map(s => s.id === id ? saved : s));
+      updateSessions(prev => prev.map(s => s.id === id ? saved : s));
     } catch (error) {
       console.error('failed to rename chat session', error);
     }
@@ -1278,10 +1311,10 @@ export default function Conversations() {
     e.stopPropagation();
     const current = sessions.find((session) => session.id === id);
     const nextPinned = !current?.pinned;
-    setSessions(prev => prev.map(s => s.id === id ? { ...s, pinned: nextPinned } : s));
+    updateSessions(prev => prev.map(s => s.id === id ? { ...s, pinned: nextPinned } : s));
     try {
       const saved = await patchChatSession(id, { pinned: nextPinned });
-      setSessions(prev => prev.map(s => s.id === id ? saved : s));
+      updateSessions(prev => prev.map(s => s.id === id ? saved : s));
     } catch (error) {
       console.error('failed to pin chat session', error);
     }
@@ -1291,7 +1324,7 @@ export default function Conversations() {
     e.stopPropagation();
     try {
       const copied = await forkChatSessionApi(source.id);
-      setSessions(prev => [copied, ...prev.filter(s => s.id !== copied.id)]);
+      updateSessions(prev => [copied, ...prev.filter(s => s.id !== copied.id)]);
       setSessionSearch('');
       void openSession(copied);
     } catch (error) {
@@ -1309,7 +1342,7 @@ export default function Conversations() {
       delete next[id];
       return next;
     });
-    setSessions(updated);
+    updateSessions(() => updated);
     if (activeSessionId === id) {
       sessionLoadSeqRef.current += 1;
       setLoadingSessionId('');
@@ -1325,7 +1358,7 @@ export default function Conversations() {
       await deleteChatSessionApi(id);
     } catch (error) {
       console.error('failed to delete chat session', error);
-      setSessions(sessions);
+      updateSessions(() => sessions);
     }
   };
 

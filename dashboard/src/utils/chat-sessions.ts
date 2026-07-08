@@ -4,6 +4,7 @@ import { normalizeChatMessageStatus, normalizeMessageOutcome, outcomeToMessageSt
 import { normalizeChatRunStats } from './chat-run-stats';
 
 const LEGACY_SESSION_KEY = 'agentma_chat_sessions';
+const SESSION_SUMMARY_CACHE_KEY_PREFIX = 'agentma_chat_session_summaries:';
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_STORED_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const GENERIC_TITLES = new Set(['新对话', '(无标题)', '未命名对话']);
@@ -176,6 +177,46 @@ export function loadLegacyChatSessions(): ChatSession[] {
   }
 }
 
+function getSummaryCacheKey(scope: string) {
+  return `${SESSION_SUMMARY_CACHE_KEY_PREFIX}${scope}`;
+}
+
+function compactSessionSummary(session: ChatSession): ChatSession {
+  return {
+    ...session,
+    messages: [],
+    messageCount: session.messageCount ?? session.messages.length,
+  };
+}
+
+export function loadCachedChatSessionSummaries(scope?: string): ChatSession[] {
+  if (!scope || typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(getSummaryCacheKey(scope));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((session) => {
+      const normalized = normalizeSession(session);
+      return normalized ? [compactSessionSummary(normalized)] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function writeCachedChatSessionSummaries(scope: string | undefined, sessions: ChatSession[]) {
+  if (!scope || typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(
+      getSummaryCacheKey(scope),
+      JSON.stringify(sessions.map(compactSessionSummary)),
+    );
+  } catch {
+    // Cache persistence is best-effort; the remote list remains authoritative.
+  }
+}
+
 export async function listChatSessions(): Promise<ChatSession[]> {
   const res = await fetch('/api/chat-sessions', {
     headers: getAuthHeaders(),
@@ -312,7 +353,9 @@ export function subscribeChatSessionEvents(
           try {
             const event = JSON.parse(line.slice(6)) as ChatSessionEvent;
             if (event?.type && event.sessionId) onEvent(event);
-          } catch {}
+          } catch {
+            // Ignore malformed SSE chunks and keep the stream alive.
+          }
         }
       }
     } catch (error) {
@@ -331,15 +374,26 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
   await readJson(res);
 }
 
-export async function bootstrapChatSessions(allowLegacyImport = true): Promise<ChatSession[]> {
+export async function bootstrapChatSessions(allowLegacyImport = true, cacheScope?: string): Promise<ChatSession[]> {
   const remoteSessions = await listChatSessionSummaries();
-  if (remoteSessions.length > 0) return remoteSessions;
+  if (remoteSessions.length > 0) {
+    writeCachedChatSessionSummaries(cacheScope, remoteSessions);
+    return remoteSessions;
+  }
 
-  if (!allowLegacyImport) return [];
+  if (!allowLegacyImport) {
+    writeCachedChatSessionSummaries(cacheScope, []);
+    return [];
+  }
 
   const legacySessions = loadLegacyChatSessions();
-  if (legacySessions.length === 0) return [];
+  if (legacySessions.length === 0) {
+    writeCachedChatSessionSummaries(cacheScope, []);
+    return [];
+  }
 
   await Promise.allSettled(legacySessions.map((session) => saveChatSession(session)));
-  return listChatSessionSummaries();
+  const importedSessions = await listChatSessionSummaries();
+  writeCachedChatSessionSummaries(cacheScope, importedSessions);
+  return importedSessions;
 }
