@@ -4633,21 +4633,252 @@ tr:hover td {
 
 /* 总览:画布锁在内容面板内,深空底铺满面板 */
 .main-content.cosmic {
+  --bg: transparent;
+  --bg-card: rgba(18, 22, 40, .55);
+  --bg-hover: rgba(255, 255, 255, .06);
+  --ink: #f5f5f4;
+  --ink-secondary: #c7c9d1;
+  --ink-muted: #8b8fa3;
+  --border: rgba(255, 255, 255, .12);
   position: relative;
+  height: 100vh;
+  min-height: 0;
   overflow: hidden;
   background:
     radial-gradient(120% 120% at 50% 20%, #141a33 0%, #0b1020 45%, #05060d 100%);
 }
 .main-content.cosmic .console-topbar { position: relative; z-index: 1; background: transparent; }
+.main-content.cosmic .content-surface {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px 24px 24px;
+  display: flex;
+}
 .main-content.cosmic .topbar-status {
   border-color: rgba(247, 243, 231, .26);
   color: rgba(247, 243, 231, .72);
 }
-.cosmic-overview { perspective: 1600px; }
-.cosmic-overview > .cosmic-content { position: relative; z-index: 1; }
+.cosmic-overview {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  perspective: 1600px;
+}
+.cosmic-overview > .cosmic-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+}
 /* 总览只保留宇宙图:舞台撑满视口剩余高度 */
-.cosmic-overview .universe-wrap { margin-bottom: 0; }
-.cosmic-overview .universe-stage { height: calc(100vh - 200px); min-height: 480px; }
+.cosmic-overview .universe-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  margin-bottom: 0;
+}
+.cosmic-overview .universe-stage {
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.overview-run-metric {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  max-width: calc(100% - 32px);
+  padding: 6px 10px;
+  border: 1px solid rgba(247, 243, 231, .2);
+  border-radius: 999px;
+  background: rgba(5, 6, 13, .34);
+  color: rgba(247, 243, 231, .7);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.overview-run-metric strong {
+  color: #f7f3e7;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-shadow: 0 0 16px rgba(255, 224, 160, .3);
+}
+
+.universe-stage-fallback {
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255, 224, 160, .18), transparent 9%),
+    radial-gradient(ellipse at 48% 52%, rgba(124, 58, 237, .2), transparent 40%),
+    radial-gradient(ellipse at 54% 48%, rgba(16, 185, 129, .12), transparent 36%),
+    radial-gradient(120% 100% at 50% 50%, rgba(20, 26, 51, .2), rgba(5, 6, 13, .02));
+}
+.fallback-starfield,
+.fallback-galaxy-core,
+.fallback-spiral {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.fallback-starfield {
+  z-index: 0;
+  opacity: .86;
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, .82) 0 1px, transparent 1.4px),
+    radial-gradient(circle, rgba(158, 190, 255, .55) 0 1px, transparent 1.7px),
+    radial-gradient(circle, rgba(255, 225, 160, .42) 0 1px, transparent 1.6px);
+  background-position: 0 0, 38px 61px, 91px 24px;
+  background-size: 97px 83px, 141px 109px, 197px 151px;
+  mask-image: radial-gradient(ellipse at 50% 50%, #000 0 64%, transparent 86%);
+}
+.fallback-galaxy-core {
+  z-index: 1;
+  width: min(18vw, 180px);
+  aspect-ratio: 1;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, #fff5cf 0 5%, #ffd27a 16%, rgba(245, 158, 11, .32) 36%, transparent 68%);
+  filter: blur(.4px);
+  box-shadow: 0 0 80px rgba(245, 158, 11, .24);
+}
+.fallback-spiral {
+  z-index: 1;
+  width: min(76vw, 920px);
+  height: min(38vw, 420px);
+  inset: 50% auto auto 50%;
+  border-radius: 50%;
+  border: 1px solid rgba(247, 243, 231, .08);
+  background:
+    linear-gradient(90deg, transparent 0 12%, rgba(124, 58, 237, .26) 30%, rgba(16, 185, 129, .16) 52%, rgba(37, 99, 235, .22) 74%, transparent 92%);
+  filter: blur(1px);
+  mix-blend-mode: screen;
+  transform-origin: center;
+}
+.fallback-spiral-a { transform: translate(-50%, -50%) rotate(18deg); }
+.fallback-spiral-b { transform: translate(-50%, -50%) rotate(72deg) scale(.88); opacity: .72; }
+.fallback-spiral-c { transform: translate(-50%, -50%) rotate(132deg) scale(.72); opacity: .48; }
+.fallback-planet {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--c);
+  text-decoration: none;
+  transform: translate(-50%, -50%);
+  text-shadow: 0 1px 12px rgba(0, 0, 0, .72);
+}
+.fallback-planet::after {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 28px;
+  width: 1px;
+  height: 28px;
+  background: linear-gradient(var(--c), transparent);
+  opacity: .55;
+}
+.fallback-planet-dot {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 28px;
+  border: 1px solid color-mix(in srgb, var(--c) 70%, transparent);
+  border-radius: 50%;
+  background: rgba(5, 6, 13, .36);
+  box-shadow: 0 0 22px color-mix(in srgb, var(--c) 32%, transparent);
+}
+.fallback-planet-dot svg {
+  width: 15px;
+  height: 15px;
+}
+.fallback-planet-name {
+  font-family: var(--font-hand);
+  font-size: 20px;
+  line-height: 1;
+  white-space: nowrap;
+  border-bottom: 1px solid color-mix(in srgb, var(--c) 60%, transparent);
+}
+.fallback-planet:hover .fallback-planet-dot,
+.fallback-planet:focus-visible .fallback-planet-dot {
+  background: color-mix(in srgb, var(--c) 16%, rgba(5, 6, 13, .62));
+  box-shadow: 0 0 30px color-mix(in srgb, var(--c) 50%, transparent);
+}
+.fallback-planet:focus-visible {
+  outline: 2px solid var(--c);
+  outline-offset: 6px;
+}
+
+@media (max-width: 760px) {
+  .main-content.cosmic .content-surface {
+    padding: 10px 8px 12px;
+  }
+
+  .overview-run-metric {
+    top: 10px;
+    right: 10px;
+    gap: 5px;
+    padding: 5px 8px;
+    font-size: 9.5px;
+  }
+
+  .overview-run-metric strong {
+    font-size: 16px;
+  }
+
+  .fallback-galaxy-core {
+    width: 120px;
+  }
+
+  .fallback-spiral {
+    width: 720px;
+    height: 330px;
+  }
+
+  .fallback-planet {
+    gap: 5px;
+  }
+
+  .fallback-planet-dot {
+    width: 24px;
+    height: 24px;
+    flex-basis: 24px;
+  }
+
+  .fallback-planet-name {
+    max-width: 88px;
+    overflow: hidden;
+    font-size: 16px;
+    text-overflow: ellipsis;
+  }
+}
 
 /* 功能宇宙 */
 .universe-wrap { position: relative; margin-bottom: 24px; }

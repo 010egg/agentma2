@@ -5,7 +5,7 @@ import LineIcon from './LineIcon';
 import Sidebar from './Sidebar';
 
 const PAGE_META = [
-  { match: (path: string) => path === '/', title: '总览', eyebrow: 'overview', lede: 'SDK 状态、配额、模板和运行入口。' },
+  { match: (path: string) => path === '/', title: '总览', eyebrow: 'overview', lede: '基于全球顶级 Agent 框架实现的 Agent 管理平台。' },
   { match: (path: string) => path.startsWith('/conversations'), title: '会话', eyebrow: 'conversation', lede: '多 Agent 对话、历史、分叉、权限和工具调用。' },
   { match: (path: string) => path === '/agents', title: 'Agent 市场', eyebrow: 'agents', lede: '创建、配置和组合可复用 Agent。' },
   { match: (path: string) => path.startsWith('/agents/') && path.endsWith('/chat'), title: 'Agent Chat', eyebrow: 'agent runtime', lede: '直接和选定 Agent 运行一次真实会话。' },

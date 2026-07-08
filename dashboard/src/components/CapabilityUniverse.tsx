@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -44,6 +45,18 @@ export interface UniverseSection {
 }
 
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
+const FALLBACK_POSITIONS = [
+  { x: 31, y: 38 },
+  { x: 46, y: 27 },
+  { x: 59, y: 42 },
+  { x: 68, y: 57 },
+  { x: 51, y: 67 },
+  { x: 37, y: 56 },
+  { x: 25, y: 66 },
+  { x: 73, y: 35 },
+  { x: 40, y: 78 },
+  { x: 61, y: 76 },
+];
 
 /** 性能档位:桌面高 / 桌面低·平板 / 移动 */
 const TIERS = [
@@ -516,18 +529,35 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
 
   if (!webgl) {
     return (
-      <div className="grid-3 mb-4">
-        {sections.map((s) => (
-          <Link key={s.path} to={s.path} style={{ textDecoration: 'none' }}>
-            <div className="tool-card" style={{ borderTop: `3px solid ${s.color}` }}>
-              <div className="overview-module-icon" style={{ color: s.color }}>
-                <LineIcon name={s.icon} />
-              </div>
-              <div className="tool-card-name" style={{ color: s.color }}>{s.title}</div>
-              <div className="tool-card-desc">{s.desc}</div>
-            </div>
-          </Link>
-        ))}
+      <div className="universe-wrap">
+        <div className="universe-stage universe-stage-fallback">
+          <div className="fallback-starfield" />
+          <div className="fallback-galaxy-core" />
+          <div className="fallback-spiral fallback-spiral-a" />
+          <div className="fallback-spiral fallback-spiral-b" />
+          <div className="fallback-spiral fallback-spiral-c" />
+          {sections.map((s, i) => {
+            const pos = FALLBACK_POSITIONS[i % FALLBACK_POSITIONS.length];
+            return (
+              <Link
+                key={s.path}
+                to={s.path}
+                className="fallback-planet"
+                style={{
+                  '--x': `${pos.x}%`,
+                  '--y': `${pos.y}%`,
+                  '--c': s.color,
+                } as CSSProperties}
+              >
+                <span className="fallback-planet-dot">
+                  <LineIcon name={s.icon} />
+                </span>
+                <span className="fallback-planet-name">{s.title}</span>
+              </Link>
+            );
+          })}
+          <div className="universe-hint">点击星标进入</div>
+        </div>
       </div>
     );
   }
