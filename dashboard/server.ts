@@ -2165,8 +2165,12 @@ app.get('/api/chat/runs/:id/events', authMiddleware, (req: any, res) => {
     res.end();
     return;
   }
+  const heartbeat = setInterval(() => {
+    writeSse(res, { type: 'heartbeat', runId: run.id, at: Date.now() });
+  }, 10_000);
   run.subscribers.add(res);
   req.on('close', () => {
+    clearInterval(heartbeat);
     run.subscribers.delete(res);
   });
 });
