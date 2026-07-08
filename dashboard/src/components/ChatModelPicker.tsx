@@ -43,7 +43,6 @@ export default function ChatModelPicker({ value, templateModel = '', models, dis
           </>
         )}
       </select>
-      {hasOverride && <span className="badge badge-warning">覆盖模板</span>}
     </span>
   );
 }
