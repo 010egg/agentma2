@@ -1051,10 +1051,18 @@ export default function AgentChat() {
           </button>
           <div className="composer-suggestion-field">
             {nextSuggestion.suggestionText && !input.trim() && (
-              <div className="composer-ghost-suggestion" aria-hidden="true">
-                <span>{nextSuggestion.suggestionText}</span>
-                <kbd>Tab 应用</kbd>
-              </div>
+              <button
+                type="button"
+                className="composer-ghost-suggestion"
+                onClick={handleApplySuggestion}
+                disabled={isStreaming}
+                aria-label={`应用推荐回复：${nextSuggestion.suggestionText}`}
+                title="应用推荐回复"
+              >
+                <span className="composer-suggestion-text">{nextSuggestion.suggestionText}</span>
+                <kbd className="composer-suggestion-key-hint">Tab 应用</kbd>
+                <span className="composer-suggestion-touch-hint" aria-hidden="true">点击应用</span>
+              </button>
             )}
             <textarea
               ref={textareaRef}
