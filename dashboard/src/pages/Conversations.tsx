@@ -169,6 +169,11 @@ function isTextEntryElement(element: Element | null) {
   return !['button', 'checkbox', 'color', 'file', 'radio', 'range', 'reset', 'submit'].includes(type);
 }
 
+function userInitial(label?: string) {
+  const raw = (label || 'A').trim();
+  return raw.slice(0, 1).toUpperCase();
+}
+
 type ConversationUrlState = Pick<ChatSession, 'id' | 'sdkSessionId'> | null;
 type SessionRunUiState = {
   isStreaming: boolean;
@@ -1802,6 +1807,11 @@ export default function Conversations() {
     runAbortControllersRef.current.get(activeSessionId)?.abort();
   }, [activeSessionId]);
 
+  const handleOpenMobileNavigation = useCallback(() => {
+    setMobileListOpen(false);
+    window.dispatchEvent(new Event('agentma:open-mobile-nav'));
+  }, []);
+
   const handleApplySuggestion = useCallback(() => {
     const accepted = nextSuggestion.acceptSuggestion();
     if (!accepted) return false;
@@ -2204,6 +2214,19 @@ export default function Conversations() {
               {templates.length === 0 ? '请先创建 Agent' : '选择 Agent 开始对话'}
             </div>
           )}
+        </div>
+        <div className="conversation-sidebar-account">
+          <button
+            type="button"
+            className="conversation-sidebar-account-button"
+            onClick={handleOpenMobileNavigation}
+            aria-label="打开主导航"
+            title="打开主导航"
+          >
+            <span className="conversation-sidebar-account-avatar" aria-hidden="true">
+              {userInitial(user?.username || user?.name || user?.email)}
+            </span>
+          </button>
         </div>
       </div>
 

@@ -1377,6 +1377,30 @@ label {
   padding: 8px;
 }
 
+.conversation-sidebar-account {
+  display: none;
+}
+
+.conversation-sidebar-account-button {
+  width: 44px;
+  height: 44px;
+  display: inline-grid;
+  place-items: center;
+  border: 1.5px solid var(--ink);
+  border-radius: 50%;
+  background: var(--bg-card);
+  color: var(--ink);
+  box-shadow: 2px 3px 0 0 var(--ink);
+  cursor: pointer;
+}
+
+.conversation-sidebar-account-avatar {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .conversation-session-item {
   min-width: 0;
   position: relative;
@@ -4703,4 +4727,30 @@ tr:hover td {
   font-size: 12px;
   color: var(--ink-muted);
   pointer-events: none;
+}
+
+@media (max-width: 768px) {
+  .app-layout.conversation-route:not(.mobile-nav-open) .mobile-menu-btn {
+    display: none;
+  }
+
+  .app-layout.conversation-route .conversation-header {
+    padding-left: 10px;
+  }
+
+  .app-layout.conversation-route .conversation-mobile-panel {
+    padding-left: 10px;
+  }
+
+  .conversation-sidebar-account {
+    position: absolute;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    z-index: 2;
+    display: block;
+  }
+
+  .conversation-sidebar.open .conversation-session-list {
+    padding-bottom: 72px;
+  }
 }

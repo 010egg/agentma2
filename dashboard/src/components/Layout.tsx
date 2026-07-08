@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 import LineIcon from './LineIcon';
@@ -33,6 +33,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
   const isVizPreview = location.pathname === '/viz';
   const isOverview = location.pathname === '/';
+  const isConversationRoute = location.pathname.startsWith('/conversations');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -51,10 +52,16 @@ export default function Layout({ children }: { children: ReactNode }) {
       return next;
     });
   };
+  useEffect(() => {
+    const handleOpenMobileNav = () => setSidebarOpen(true);
+    window.addEventListener('agentma:open-mobile-nav', handleOpenMobileNav);
+    return () => window.removeEventListener('agentma:open-mobile-nav', handleOpenMobileNav);
+  }, []);
+
   const pageMeta = getPageMeta(location.pathname);
 
   return (
-    <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+    <div className={`app-layout${sidebarCollapsed ? ' sidebar-collapsed' : ''}${isConversationRoute ? ' conversation-route' : ''}${sidebarOpen ? ' mobile-nav-open' : ''}`}>
       <button
         type="button"
         className="mobile-menu-btn icon-btn"
