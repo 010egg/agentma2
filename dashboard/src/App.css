@@ -2774,12 +2774,12 @@ label {
   }
 
   .conversation-composer {
-    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
   }
 
   .conversation-composer .chat-input-area {
-    padding: 8px;
-    gap: 8px;
+    padding: 6px;
+    gap: 6px;
     border-radius: var(--radius);
   }
 
@@ -2789,7 +2789,7 @@ label {
   }
 
   .conversation-composer-toolbar {
-    gap: 8px;
+    gap: 6px;
     align-items: flex-end;
   }
 
@@ -2803,10 +2803,10 @@ label {
   }
 
   .conversation-composer-input {
-    min-height: 72px;
-    padding: 8px 2px;
+    min-height: 48px;
+    padding: 5px 2px;
     font-size: 16px;
-    line-height: 1.45;
+    line-height: 1.35;
   }
 
   .composer-icon-btn {
