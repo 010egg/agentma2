@@ -88,7 +88,8 @@ import {
   resolveAskUserQuestion,
 } from './server-agent.ts';
 import type { AgentEvent } from './server-agent.ts';
-import type { Role } from './server-store.ts';
+import { listMemories, readMemory, writeMemory, deleteMemory, consolidateMemories } from './server-memory.ts';
+import type { Role, ChatHistoryVisual } from './server-store.ts';
 import {
   importDatasourceUpload,
   runDatasourceQuery,
@@ -149,6 +150,10 @@ type ServerOwnedRun = {
   sdkCwd?: string;
   structuredOutput?: unknown;
   runStats?: { costUsd?: number; durationMs?: number; inTok?: number; outTok?: number };
+  /** Relative `viz/<slug>.html` paths the agent wrote this run (from agentma-visual auto-allow). */
+  vizWrites: Set<string>;
+  /** Visuals persisted to the DB at run end; surfaced as /viz?id= cards. */
+  savedVisuals?: ChatHistoryVisual[];
 };
 
 const serverRuns = new Map<string, ServerOwnedRun>();
@@ -185,6 +190,7 @@ function appendAssistantForServerRun(run: ServerOwnedRun, content: string, outco
       ...(run.thinking ? { thinking: run.thinking } : {}),
       ...(run.outcomeDetail ? { outcomeDetail: run.outcomeDetail } : {}),
       ...(run.runStats ? { runStats: run.runStats } : {}),
+      ...(run.savedVisuals?.length ? { visuals: run.savedVisuals } : {}),
       runId: run.id,
     },
   ];
@@ -837,16 +843,12 @@ function extractVisualTitle(content: string, format: 'html' | 'markdown', relPat
   return format === 'markdown' ? extractMarkdownTitle(content, relPath) : extractTitle(content);
 }
 
-function readWorkspaceVisual(auth: any, cid: string, relPath: string) {
-  const sessionId = parseConversationIdInput(cid);
-  if (!sessionId) throw makeHttpError('need cid', 400);
-  const session = getChatSession(auth.tenantId, getChatOwnerSub(auth), sessionId);
-  if (!session) throw makeHttpError('对话不存在或无权访问', 404);
-  const sdkCwd = typeof session.sdkCwd === 'string' ? session.sdkCwd.trim() : '';
-  if (!sdkCwd) throw makeHttpError('该对话没有 workspace', 404);
+// Read a `viz/<slug>.html` file out of an already-resolved workspace cwd, with the
+// same whitelist + traversal + size guards used by the cid-based reader. No session
+// lookup — callers that already hold the run's sdkCwd (e.g. autosave) use this directly.
+function readVisualFileUnder(cwdRaw: string, relPath: string) {
   if (!/^viz\/[A-Za-z0-9._-]+\.(html|md|markdown)$/i.test(relPath)) throw makeHttpError('非法路径', 400);
-
-  const cwdInput = path.resolve(expandLocalPath(sdkCwd));
+  const cwdInput = path.resolve(expandLocalPath(cwdRaw));
   if (!fs.existsSync(cwdInput)) throw makeHttpError('workspace 不存在', 404);
   const cwd = fs.realpathSync(cwdInput);
   const file = path.resolve(cwd, relPath);
@@ -863,6 +865,40 @@ function readWorkspaceVisual(auth: any, cid: string, relPath: string) {
     sourceSlug: relPath,
     mtimeMs: stat.mtimeMs,
   };
+}
+
+function readWorkspaceVisual(auth: any, cid: string, relPath: string) {
+  const sessionId = parseConversationIdInput(cid);
+  if (!sessionId) throw makeHttpError('need cid', 400);
+  const session = getChatSession(auth.tenantId, getChatOwnerSub(auth), sessionId);
+  if (!session) throw makeHttpError('对话不存在或无权访问', 404);
+  const sdkCwd = typeof session.sdkCwd === 'string' ? session.sdkCwd.trim() : '';
+  if (!sdkCwd) throw makeHttpError('该对话没有 workspace', 404);
+  return readVisualFileUnder(sdkCwd, relPath);
+}
+
+// 生成即落库:把本轮 agent 写出的 viz 文件(相对路径)直接读盘 + createVisual,
+// 返回可用 /viz?id= 打开的自包含链接。失败(越界/超限/读失败)静默跳过,不阻断回复。
+function autosaveRunVisuals(
+  auth: { tenantId: string; sub: string },
+  cwdRaw: string | undefined,
+  relPaths: Iterable<string>,
+  onWarn?: (relPath: string, reason: string) => void,
+): ChatHistoryVisual[] {
+  const saved: ChatHistoryVisual[] = [];
+  if (!cwdRaw) return saved;
+  const ownerSub = getChatOwnerSub(auth);
+  for (const relPath of relPaths) {
+    try {
+      const { html, format, sourceSlug } = readVisualFileUnder(cwdRaw, relPath);
+      const title = extractVisualTitle(html, format, sourceSlug);
+      const { id } = createVisual(auth.tenantId, ownerSub, { title, html, sourceSlug });
+      saved.push({ id, title: title || undefined, slug: relPath });
+    } catch (error) {
+      onWarn?.(relPath, (error as Error).message || 'unknown');
+    }
+  }
+  return saved;
 }
 
 function resolveWorkspaceRootFromConversation(auth: any, conversationId: string) {
@@ -1993,6 +2029,7 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     assistantTimestamp: Number(req.body?.assistantTimestamp) || Date.now(),
     thinking: '',
     text: '',
+    vizWrites: new Set<string>(),
   };
   serverRuns.set(runId, run);
   persistServerRunPendingMessage(run);
@@ -2013,6 +2050,13 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
       run.cachedErrorMessage = event.message;
       run.outcome = run.outcome || 'provider_error';
       run.outcomeDetail = run.outcomeDetail || event.message;
+    } else if (event.type === 'permission_resolved') {
+      // agentma-visual 写 viz/<slug>.html 时会自动放行并带上这个 reason;记下来,run 收尾时落库。
+      const marker = 'agentma-visual:';
+      if (event.decision === 'allow' && typeof event.reason === 'string' && event.reason.startsWith(marker)) {
+        const relPath = event.reason.slice(marker.length).trim();
+        if (relPath) run.vizWrites.add(relPath);
+      }
     } else if (event.type === 'result') {
       run.sdkSessionId = event.sdkSessionId;
       run.sdkCwd = event.sdkCwd;
@@ -2023,6 +2067,17 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
         inTok: event.usage?.input_tokens,
         outTok: event.usage?.output_tokens,
       };
+      // 生成即落库:此刻本轮所有 Write 已执行完,viz 文件已落盘。读盘 + createVisual,
+      // 得到自包含、不依赖会话 id、重启不失效的 /viz?id= 链接。落库结果随最终消息持久化。
+      if (run.vizWrites.size) {
+        const saved = autosaveRunVisuals(req.auth, run.sdkCwd, run.vizWrites, (relPath, reason) => {
+          emitServerRun(run, { type: 'run_log', level: 'warn', scope: 'visual', message: `可视化落库失败 ${relPath}: ${reason}` });
+        });
+        if (saved.length) {
+          run.savedVisuals = saved;
+          emitServerRun(run, { type: 'visuals_ready', visuals: saved });
+        }
+      }
       const outcome = run.outcome || mapResultSubtypeToOutcome(event.subtype);
       const finalContent = run.text || event.text || (run.cachedErrorMessage ? `错误: ${run.cachedErrorMessage}` : '');
       persistServerRunFinalMessage(run, finalContent, outcome);
@@ -3838,6 +3893,61 @@ app.delete('/api/skills/user/:name', authMiddleware, (req: any, res) => {
   } catch (error) {
     const err = error as Error & { status?: number };
     res.status(err.status || 500).json({ error: err.message || '删除失败' });
+  }
+});
+
+// ═══ Memory Routes (per-user 跨会话记忆) ═══
+app.get('/api/memory', authMiddleware, (req: any, res) => {
+  try {
+    res.json(listMemories(req.auth));
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || '读取记忆失败' });
+  }
+});
+
+app.get('/api/memory/:name', authMiddleware, (req: any, res) => {
+  try {
+    const item = readMemory(req.auth, String(req.params?.name || ''));
+    if (!item) { res.status(404).json({ error: '记忆不存在' }); return; }
+    res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || '读取记忆失败' });
+  }
+});
+
+app.put('/api/memory/:name', authMiddleware, (req: any, res) => {
+  try {
+    const saved = writeMemory(req.auth, {
+      name: String(req.params?.name || req.body?.name || ''),
+      description: String(req.body?.description || ''),
+      type: typeof req.body?.type === 'string' ? req.body.type : undefined,
+      body: String(req.body?.body || ''),
+    });
+    audit(req.auth.tenantId, 'upsert_memory', req.auth.sub, 'memory', saved.name, {});
+    res.json({ ok: true, name: saved.name });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message || '保存记忆失败' });
+  }
+});
+
+app.delete('/api/memory/:name', authMiddleware, (req: any, res) => {
+  try {
+    const ok = deleteMemory(req.auth, String(req.params?.name || ''));
+    if (!ok) { res.status(404).json({ error: '记忆不存在' }); return; }
+    audit(req.auth.tenantId, 'delete_memory', req.auth.sub, 'memory', String(req.params?.name || ''), {});
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || '删除记忆失败' });
+  }
+});
+
+app.post('/api/memory/consolidate', authMiddleware, (req: any, res) => {
+  try {
+    const result = consolidateMemories(req.auth);
+    audit(req.auth.tenantId, 'consolidate_memory', req.auth.sub, 'memory', '', result);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || '整理记忆失败' });
   }
 });
 

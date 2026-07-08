@@ -54,7 +54,32 @@ export function readMemoryContext(auth: MemoryAuth): string {
   } catch { return ''; }
 }
 
-// 写入一条记忆:落 <slug>.md(带 frontmatter) + 更新 MEMORY.md 索引行。路径锁死在用户目录内。
+// 解析一条记忆文件的 frontmatter + 正文。
+export function parseMemoryFile(content: string): { name: string; description: string; type: MemoryType; body: string } {
+  const m = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { name: '', description: '', type: 'project', body: String(content || '').trim() };
+  const fm = m[1];
+  const name = (fm.match(/^name:\s*(.*)$/m)?.[1] || '').trim();
+  const description = (fm.match(/^description:\s*(.*)$/m)?.[1] || '').trim();
+  const rawType = (fm.match(/type:\s*([A-Za-z]+)/)?.[1] || 'project') as MemoryType;
+  return { name, description, type: MEMORY_TYPES.includes(rawType) ? rawType : 'project', body: m[2].trim() };
+}
+
+// 从实际文件重建 MEMORY.md 索引(丢弃孤儿索引项、保持与文件一致)。
+function rebuildIndex(root: string) {
+  const files = fs.readdirSync(root).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md').sort();
+  const lines = ['# Memory Index'];
+  for (const f of files) {
+    try {
+      const p = parseMemoryFile(fs.readFileSync(path.join(root, f), 'utf-8'));
+      const slug = f.replace(/\.md$/, '');
+      lines.push(`- [${slug}](${f}) — ${p.description || p.type}`);
+    } catch {}
+  }
+  fs.writeFileSync(path.join(root, 'MEMORY.md'), lines.join('\n') + '\n', 'utf-8');
+}
+
+// 写入一条记忆:落 <slug>.md(带 frontmatter) + 重建 MEMORY.md 索引。路径锁死在用户目录内。
 export function writeMemory(auth: MemoryAuth, input: { name: string; description: string; type?: string; body: string }) {
   const dir = userMemoryDir(auth);
   fs.mkdirSync(dir, { recursive: true });
@@ -69,16 +94,71 @@ export function writeMemory(auth: MemoryAuth, input: { name: string; description
   const content = `---\nname: ${slug}\ndescription: ${desc}\nmetadata:\n  type: ${type}\n---\n\n${body}\n`;
   fs.writeFileSync(filePath, content, 'utf-8');
 
-  const indexPath = path.join(root, 'MEMORY.md');
-  let index = '';
-  try { index = fs.existsSync(indexPath) ? fs.readFileSync(indexPath, 'utf-8') : ''; } catch {}
-  if (!index.trim()) index = '# Memory Index\n';
-  const line = `- [${slug}](${slug}.md) — ${desc || type}`;
-  const lines = index.split('\n').filter((l) => l.trim() && !l.includes(`(${slug}.md)`));
-  if (lines[0] !== '# Memory Index') lines.unshift('# Memory Index');
-  lines.push(line);
-  fs.writeFileSync(indexPath, lines.join('\n') + '\n', 'utf-8');
+  rebuildIndex(root);
   return { name: slug, path: filePath };
+}
+
+// ── 管理面(供 REST/UI 使用) ─────────────────────────────────────────────
+export type MemoryListItem = { name: string; description: string; type: MemoryType; updatedAt: number; sizeBytes: number };
+
+export function listMemories(auth: MemoryAuth): MemoryListItem[] {
+  const dir = userMemoryDir(auth);
+  if (!fs.existsSync(dir)) return [];
+  const root = fs.realpathSync(dir);
+  const out: MemoryListItem[] = [];
+  for (const f of fs.readdirSync(root)) {
+    if (!f.endsWith('.md') || f === 'MEMORY.md') continue;
+    try {
+      const full = path.join(root, f);
+      const stat = fs.statSync(full);
+      const p = parseMemoryFile(fs.readFileSync(full, 'utf-8'));
+      out.push({ name: f.replace(/\.md$/, ''), description: p.description, type: p.type, updatedAt: stat.mtimeMs, sizeBytes: stat.size });
+    } catch {}
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function readMemory(auth: MemoryAuth, name: string): (MemoryListItem & { body: string }) | null {
+  const slug = slugify(name);
+  const dir = userMemoryDir(auth);
+  if (!fs.existsSync(dir)) return null;
+  const root = fs.realpathSync(dir);
+  const full = path.join(root, `${slug}.md`);
+  if (!isInside(full, root) || !fs.existsSync(full)) return null;
+  const stat = fs.statSync(full);
+  const p = parseMemoryFile(fs.readFileSync(full, 'utf-8'));
+  return { name: slug, description: p.description, type: p.type, body: p.body, updatedAt: stat.mtimeMs, sizeBytes: stat.size };
+}
+
+export function deleteMemory(auth: MemoryAuth, name: string): boolean {
+  const slug = slugify(name);
+  const dir = userMemoryDir(auth);
+  if (!fs.existsSync(dir)) return false;
+  const root = fs.realpathSync(dir);
+  const full = path.join(root, `${slug}.md`);
+  if (!isInside(full, root) || !fs.existsSync(full)) return false;
+  fs.rmSync(full, { force: true });
+  rebuildIndex(root);
+  return true;
+}
+
+// 机械整理:剔除空/损坏文件、按正文去重、重建索引(非 LLM 语义合并)。
+export function consolidateMemories(auth: MemoryAuth): { kept: number; removed: number } {
+  const dir = userMemoryDir(auth);
+  if (!fs.existsSync(dir)) return { kept: 0, removed: 0 };
+  const root = fs.realpathSync(dir);
+  const seen = new Set<string>();
+  let kept = 0, removed = 0;
+  for (const f of fs.readdirSync(root).filter((x) => x.endsWith('.md') && x !== 'MEMORY.md').sort()) {
+    const full = path.join(root, f);
+    let body = '';
+    try { body = parseMemoryFile(fs.readFileSync(full, 'utf-8')).body; } catch { fs.rmSync(full, { force: true }); removed++; continue; }
+    const key = body.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!key || seen.has(key)) { fs.rmSync(full, { force: true }); removed++; continue; }
+    seen.add(key); kept++;
+  }
+  rebuildIndex(root);
+  return { kept, removed };
 }
 
 const REMEMBER_DESC = '把非显而易见、以后跨会话能复用的事实存入长期记忆(仅本用户可见)。适合:用户身份/偏好、你被纠正过的做法(含原因)、项目约束或目标、外部资源指针。不要存能从代码/历史直接得到的、或只对当前对话有用的内容。保存前先看已注入的 <memory> 里有没有,避免重复。';

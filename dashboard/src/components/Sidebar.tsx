@@ -13,6 +13,7 @@ const SECTIONS = [
       { path: '/knowledge', label: '知识库', icon: 'book' },
       { path: '/visuals', label: '我的可视化', icon: 'chart' },
       { path: '/skills', label: '技能背包', icon: 'spark' },
+      { path: '/memories', label: 'Agent 记忆', icon: 'pin' },
       { path: '/account', label: '账户管理', icon: 'user' },
     ],
   },

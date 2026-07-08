@@ -13,6 +13,7 @@ import Tools from './pages/Tools';
 import Knowledge from './pages/Knowledge';
 import Hooks from './pages/Hooks';
 import Skills from './pages/Skills';
+import Memories from './pages/Memories';
 import VizPreview from './pages/VizPreview';
 import Visuals from './pages/Visuals';
 import Subagents from './pages/Subagents';
@@ -42,6 +43,7 @@ export default function App() {
                 <Route path="/viz" element={<VizPreview />} />
                 <Route path="/visuals" element={<Visuals />} />
                 <Route path="/skills" element={<Skills />} />
+                <Route path="/memories" element={<Memories />} />
                 <Route path="/hooks" element={<Hooks />} />
                 <Route path="/subagents" element={<Subagents />} />
                 <Route path="/permissions" element={<Permissions />} />
