@@ -78,8 +78,14 @@ type AgentImportReport = {
 };
 
 function loadSkills(): SkillInfo[] {
-  try { const raw = localStorage.getItem('agentma_skills'); if (raw) return JSON.parse(raw); } catch {}
-  return DEFAULT_SKILLS;
+  try {
+    const raw = localStorage.getItem('agentma_skills');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(skill => ({ ...skill, enabled: true }));
+    }
+  } catch {}
+  return DEFAULT_SKILLS.map(skill => ({ ...skill, enabled: true }));
 }
 
 function loadMcpServers(): { name: string }[] {
@@ -1537,14 +1543,12 @@ export default function Agents() {
                         background: (form.skills || []).includes(skill.name) ? 'var(--accent-bg)' : 'var(--bg-hover)',
                         color: (form.skills || []).includes(skill.name) ? 'var(--accent)' : 'var(--ink-secondary)',
                         border: `1px solid ${(form.skills || []).includes(skill.name) ? 'var(--accent)' : 'transparent'}`,
-                        opacity: skill.enabled ? 1 : .5,
                       }}
                     >
                       <input
                         type="checkbox"
                         checked={(form.skills || []).includes(skill.name)}
                         onChange={() => toggleSkill(skill.name)}
-                        disabled={!skill.enabled}
                         style={{ width: 'auto', margin: 0 }}
                       />
                       {skill.name}

@@ -1,11 +1,10 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { PublicSkillInfo, SkillInfo } from '../simulator/types';
 import { initSkills, saveSkills } from '../simulator/mock-data';
 import { loadCachedAgentTemplates } from '../utils/agent-templates';
 import { useAuth } from '../contexts/AuthContext';
 import { getAuthHeaders } from '../utils/client-runtime';
 import { parseConversationIdInput } from '../utils/conversation-links';
-import StatusBadge from '../components/common/StatusBadge';
 
 const LOCATION_LABELS: Record<string, { label: string; color: string }> = {
   user: { label: '用户级', color: 'var(--info)' },
@@ -16,14 +15,6 @@ const LOCATION_LABELS: Record<string, { label: string; color: string }> = {
 function candidatePath(skill: SkillInfo) {
   return skill.sourcePath || skill.path;
 }
-
-type LocalSkillCandidate = {
-  key: string;
-  name: string;
-  description: string;
-  displayPath: string;
-  files: { file: File; relativePath: string }[];
-};
 
 function toPublicSkillInfo(data: Record<string, unknown>): PublicSkillInfo {
   return {
@@ -43,34 +34,25 @@ function shortDate(timestamp: number) {
   return timestamp ? new Date(timestamp).toLocaleDateString() : '未知';
 }
 
-function getDirectoryRelativePath(file: File) {
-  return ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name).replace(/\\/g, '/');
-}
-
 function mergeSkillsWithLocalState(serverSkills: SkillInfo[], localSkills: SkillInfo[]) {
-  const localByName = new Map(localSkills.map(skill => [skill.name, skill]));
-  const merged = serverSkills.map(skill => {
-    const local = localByName.get(skill.name);
-    return local ? { ...skill, enabled: local.enabled } : skill;
-  });
+  const merged = serverSkills.map(skill => ({ ...skill, enabled: true }));
   const serverNames = new Set(merged.map(skill => skill.name));
-  const extraLocal = localSkills.filter(skill => skill.location !== 'user' && !serverNames.has(skill.name));
+  const extraLocal = localSkills
+    .filter(skill => skill.location !== 'user' && !serverNames.has(skill.name))
+    .map(skill => ({ ...skill, enabled: true }));
   return [...merged, ...extraLocal];
 }
 
 export default function Skills() {
   const { user } = useAuth();
   const [activeView, setActiveView] = useState<'backpack' | 'public'>('backpack');
+  const [activeImportMethod, setActiveImportMethod] = useState<'github' | 'local' | 'workspace'>('github');
   const [skills, setSkills] = useState<SkillInfo[]>(() => initSkills());
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     saveSkills(skills);
   }, [skills]);
-
-  const toggleSkill = (name: string) => {
-    setSkills(prev => prev.map(s => s.name === name ? { ...s, enabled: !s.enabled } : s));
-  };
 
   // 每个技能被多少个 Agent 模板引用(模板自身 skills + 其 subagents 的 skills,每个模板至多计一次)
   const skillUsage = useMemo(() => {
@@ -127,10 +109,9 @@ export default function Skills() {
 
   const [localLoading, setLocalLoading] = useState(false);
   const [localMsg, setLocalMsg] = useState('');
-  const [localCandidates, setLocalCandidates] = useState<LocalSkillCandidate[]>([]);
-  const [selectedLocalKeys, setSelectedLocalKeys] = useState<string[]>([]);
-  const localFolderInputRef = useRef<HTMLInputElement | null>(null);
-  const localFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [localPath, setLocalPath] = useState('');
+  const [localCandidates, setLocalCandidates] = useState<SkillInfo[]>([]);
+  const [selectedLocalPaths, setSelectedLocalPaths] = useState<string[]>([]);
 
   // 新增的 workspace 抽取并安装能力
   const [workspaceConversationId, setWorkspaceConversationId] = useState('');
@@ -205,7 +186,7 @@ export default function Skills() {
       description: String(data.description || '').trim() || `本地技能: ${fallbackPath}`,
       location,
       path: String(data.path || fallbackPath),
-      enabled: data.enabled === false ? false : true,
+      enabled: true,
       sourcePath: typeof data.sourcePath === 'string' ? data.sourcePath : undefined,
       installedPath: typeof data.installedPath === 'string' ? data.installedPath : undefined,
       installed: data.installed === true,
@@ -264,137 +245,126 @@ export default function Skills() {
     void loadPublicSkills();
   }, [user?.tenantId]);
 
-  const handleUploadLocalFiles = (fileList: FileList | null) => {
-    const files = Array.from(fileList || []);
-    if (localFolderInputRef.current) localFolderInputRef.current.value = '';
-    if (localFileInputRef.current) localFileInputRef.current.value = '';
-    void scanLocalCandidates(files.map(file => ({ file, relativePath: getDirectoryRelativePath(file) })));
-  };
-
-  const readSkillMeta = async (file: File, fallbackName: string) => {
-    let content = '';
-    try { content = await file.text(); } catch { /* fallback below */ }
-    const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    const block = fm ? fm[1] : '';
-    const pick = (key: string) => {
-      const m = block.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
-      return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
-    };
-    const name = pick('name') || fallbackName || 'local-skill';
-    const title = content.match(/^#\s+(.+)/m);
-    const description = pick('description') || (title ? title[1].trim() : '') || `本地技能: ${name}`;
-    return { name, description };
-  };
-
-  const scanLocalCandidates = async (entries: { file: File; relativePath: string }[]) => {
-    setLocalCandidates([]);
-    setSelectedLocalKeys([]);
-    setLocalMsg('');
-    if (!entries.length) return;
-
-    const dirOf = (rp: string) => { const i = rp.lastIndexOf('/'); return i < 0 ? '' : rp.slice(0, i); };
-    const skillDirs = Array.from(new Set(
-      entries.filter(e => e.relativePath.split('/').pop() === 'SKILL.md').map(e => dirOf(e.relativePath)),
-    )).sort((a, b) => b.length - a.length);
-    if (!skillDirs.length) {
-      setLocalMsg('未找到 SKILL.md —— 请选择技能目录，或包含 SKILL.md 的文件。');
-      return;
-    }
-
-    const groups = new Map<string, { file: File; relativePath: string }[]>();
-    for (const entry of entries) {
-      const ed = dirOf(entry.relativePath);
-      const owner = skillDirs.find(d => d === '' || ed === d || ed.startsWith(`${d}/`));
-      if (owner === undefined) continue;
-      (groups.get(owner) ?? groups.set(owner, []).get(owner)!).push(entry);
-    }
-
+  const scanLocalPath = async (pathToScan: string) => {
+    const inputPath = pathToScan.trim();
+    if (!inputPath) return;
     setLocalLoading(true);
+    setLocalMsg('');
+    setLocalCandidates([]);
+    setSelectedLocalPaths([]);
+
     try {
-      const candidates: LocalSkillCandidate[] = [];
-      for (const [dir, files] of groups) {
-        const skillFile = files.find(f => f.relativePath === (dir ? `${dir}/SKILL.md` : 'SKILL.md'));
-        if (!skillFile) continue;
-        const fallbackName = dir ? dir.split('/').pop() || dir : (skillFile.file.name.replace(/\.md$/, '') || 'local-skill');
-        const meta = await readSkillMeta(skillFile.file, fallbackName);
-        candidates.push({
-          key: dir || '(根目录)',
-          name: meta.name,
-          description: meta.description,
-          displayPath: dir || '(根目录)',
-          files,
-        });
-      }
-      if (!candidates.length) {
-        setLocalMsg('未找到 SKILL.md —— 请选择技能目录，或包含 SKILL.md 的文件。');
+      const res = await fetch('/api/skills/scan-local', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ path: inputPath }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLocalMsg(`扫描失败: ${data.error || `HTTP ${res.status}`}`);
         return;
       }
-      candidates.sort((a, b) => a.name.localeCompare(b.name));
+
+      const candidates = parseSkillList(data.skills, inputPath);
+      if (!candidates.length) {
+        setLocalMsg('没有找到可导入的技能');
+        return;
+      }
+
+      const defaultSelected = candidates.map(skill => skill.path);
       setLocalCandidates(candidates);
-      setSelectedLocalKeys(candidates.map(candidate => candidate.key));
-      setLocalMsg(`✓ 扫描到 ${candidates.length} 个技能，已默认全选，确认后再导入。`);
+      setSelectedLocalPaths(defaultSelected);
+      setLocalMsg(`✓ 找到 ${candidates.length} 个技能，已选择 ${defaultSelected.length} 个可导入项`);
+    } catch (e) {
+      setLocalMsg(`扫描失败: ${(e as Error).message}`);
     } finally {
       setLocalLoading(false);
     }
   };
 
-  const toggleLocalCandidate = (key: string) => {
-    setSelectedLocalKeys(prev => (
-      prev.includes(key) ? prev.filter(item => item !== key) : [...prev, key]
+  const handlePickLocalPath = async (kind: 'directory' | 'file') => {
+    setLocalLoading(true);
+    setLocalMsg('');
+    try {
+      const res = await fetch('/api/skills/pick-local-path', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLocalMsg(`选择失败: ${data.error || `HTTP ${res.status}`}`);
+        return;
+      }
+      const pickedPath = String(data.path || '').trim();
+      if (!pickedPath) {
+        setLocalMsg('已取消选择路径');
+        return;
+      }
+      setLocalPath(pickedPath);
+      await scanLocalPath(pickedPath);
+    } catch (e) {
+      setLocalMsg(`选择失败: ${(e as Error).message}`);
+    } finally {
+      setLocalLoading(false);
+    }
+  };
+
+  const handleScanLocalPath = () => {
+    void scanLocalPath(localPath);
+  };
+
+  const toggleLocalCandidate = (skillPath: string) => {
+    setSelectedLocalPaths(prev => (
+      prev.includes(skillPath) ? prev.filter(path => path !== skillPath) : [...prev, skillPath]
     ));
   };
 
   const installSelectedLocalSkills = async () => {
-    const selected = localCandidates.filter(candidate => selectedLocalKeys.includes(candidate.key));
+    const selected = localCandidates.filter(skill => selectedLocalPaths.includes(skill.path));
     if (!selected.length) {
       setLocalMsg('请先选择要导入的技能');
       return;
     }
 
-    const existingNames = new Set(skills.filter(skill => skill.location === 'user').map(skill => skill.name));
-    const overwriteNames = selected.filter(candidate => existingNames.has(candidate.name)).map(candidate => candidate.name);
-    if (overwriteNames.length && !window.confirm(`将覆盖背包中的同名技能：${overwriteNames.join('、')}。覆盖后不可恢复，继续吗？`)) return;
-
     setLocalLoading(true);
     setLocalMsg('');
-    try {
-      const formData = new FormData();
-      formData.append('overwrite', String(overwriteNames.length > 0));
-      for (const { file, relativePath } of selected.flatMap(candidate => candidate.files)) {
-        formData.append('files', file, file.name);
-        formData.append('relativePaths', relativePath);
-      }
+    const existingNames = new Set(skills.map(s => s.name));
+    const imported: SkillInfo[] = [];
+    const skipped: string[] = [];
+    const failed: string[] = [];
 
-      const res = await fetch('/api/skills/upload', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: formData,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setLocalMsg(`导入失败: ${data.error || `HTTP ${res.status}`}`);
-        return;
+    for (const skill of selected) {
+      if (existingNames.has(skill.name)) {
+        skipped.push(skill.name);
+        continue;
       }
-
-      const installed = parseSkillList(data.skills, 'uploaded-skill');
-      if (installed.length) {
-        setSkills(prev => {
-          const installedNames = new Set(installed.map(skill => skill.name));
-          return [...prev.filter(skill => !installedNames.has(skill.name)), ...installed];
+      try {
+        const res = await fetch('/api/skills/import-local', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ path: skill.path }),
         });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          failed.push(`${skill.name}: ${data.error || `HTTP ${res.status}`}`);
+          continue;
+        }
+        imported.push(toSkillInfo(data as Record<string, unknown>, skill.path));
+      } catch (e) {
+        failed.push(`${skill.name}: ${(e as Error).message}`);
       }
-      const failed = Array.isArray(data.failed) ? data.failed.map((item: unknown) => String(item)) : [];
-      setLocalCandidates([]);
-      setSelectedLocalKeys([]);
-      setLocalMsg([
-        installed.length ? `✓ 已从你的本机导入 ${installed.length} 个技能` : '',
-        failed.length ? `失败 ${failed.length} 个：${failed.join('；')}` : '',
-      ].filter(Boolean).join(' '));
-    } catch (e) {
-      setLocalMsg(`导入失败: ${(e as Error).message}`);
-    } finally {
-      setLocalLoading(false);
     }
+
+    if (imported.length) setSkills(prev => [...prev, ...imported]);
+    setLocalCandidates([]);
+    setSelectedLocalPaths([]);
+    setLocalMsg([
+      imported.length ? `✓ 已导入 ${imported.length} 个技能` : '',
+      skipped.length ? `跳过 ${skipped.length} 个已存在：${skipped.join('、')}` : '',
+      failed.length ? `失败 ${failed.length} 个：${failed.join('；')}` : '',
+    ].filter(Boolean).join(' ') || '没有导入新的技能');
+    setLocalLoading(false);
   };
 
   const handleScanWorkspacePath = async () => {
@@ -549,7 +519,7 @@ export default function Skills() {
       setLearnConflict(null);
       setLearnNameOverride('');
       setActiveView('backpack');
-      setActionMsg({ type: 'success', text: `已学习 "${installedSkill.name}"，现在可以在我的技能背包里启用。` });
+      setActionMsg({ type: 'success', text: `已学习 "${installedSkill.name}"，现在可以在我的技能背包里使用。` });
     } catch (e) {
       setActionMsg({ type: 'error', text: `学习失败: ${(e as Error).message}` });
     } finally {
@@ -586,7 +556,6 @@ export default function Skills() {
     }
   };
 
-  const enabledCount = skills.filter(s => s.enabled).length;
   const learnedCount = skills.filter(s => s.learnedFromPublicSkillId).length;
   const canPublish = user?.role === 'tenant_admin';
 
@@ -722,209 +691,232 @@ export default function Skills() {
         </>
       ) : (
         <>
-      <div className="card mb-4">
-        <div className="card-header">从 GitHub 导入技能</div>
-        <div style={{ fontSize: '.82em', color: 'var(--ink-secondary)', marginBottom: 10 }}>
-          输入 GitHub 仓库地址或 SKILL.md 原始链接，自动同步技能定义
-        </div>
-        <div className="flex gap-2" style={{ alignItems: 'flex-start' }}>
-          <input
-            value={ghUrl}
-            onChange={e => setGhUrl(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleImportFromGitHub(); }}
-            placeholder="https://github.com/user/skill-repo 或 raw URL"
-            style={{ fontFamily: 'var(--font-mono)', fontSize: '.8em', flex: 1 }}
-          />
-          <button className="btn btn-primary" onClick={handleImportFromGitHub} disabled={ghLoading}>
-            {ghLoading ? '导入中...' : '导入'}
-          </button>
-        </div>
-        {ghMsg && (
-          <div className="mt-2" style={{
-            fontSize: '.8em',
-            color: ghMsg.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
-          }}>
-            {ghMsg}
+      <div className="card mb-4 skill-import-card">
+        <div className="skill-import-head">
+          <div>
+            <div className="card-header">导入技能</div>
+            <div className="skill-import-desc">
+              从代码仓库、本机目录或会话 workspace 添加技能到背包。
+            </div>
           </div>
-        )}
-      </div>
+          <div className="skill-import-tabs" role="tablist" aria-label="技能导入方式">
+            {[
+              { key: 'github', label: 'GitHub' },
+              { key: 'local', label: '本机' },
+              { key: 'workspace', label: 'Workspace' },
+            ].map(item => (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={activeImportMethod === item.key}
+                className={activeImportMethod === item.key ? 'active' : ''}
+                onClick={() => setActiveImportMethod(item.key as 'github' | 'local' | 'workspace')}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
-      <div className="card mb-4">
-        <div className="card-header">从本机导入技能</div>
-        <div style={{ fontSize: '.82em', color: 'var(--ink-secondary)', marginBottom: 10 }}>
-          选择你本机的技能目录，扫描后再导入选中项。
-        </div>
-        <input
-          ref={localFolderInputRef}
-          type="file"
-          multiple
-          {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-          onChange={e => { handleUploadLocalFiles(e.currentTarget.files); }}
-          style={{ display: 'none' }}
-        />
-        <input
-          ref={localFileInputRef}
-          type="file"
-          multiple
-          onChange={e => { handleUploadLocalFiles(e.currentTarget.files); }}
-          style={{ display: 'none' }}
-        />
-        <div className="flex gap-2 mb-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={() => localFolderInputRef.current?.click()} disabled={localLoading}>
-            {localLoading ? '处理中...' : '选择目录'}
-          </button>
-          <button className="btn" onClick={() => localFileInputRef.current?.click()} disabled={localLoading}>
-            选择 SKILL.md
-          </button>
-        </div>
-        {localCandidates.length > 0 && (
-          <div className="mt-3" style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-            <div className="flex-between" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '.82em', fontWeight: 600 }}>
-                候选技能 {selectedLocalKeys.length}/{localCandidates.length}
-              </span>
-              <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
-                <button className="btn btn-sm" onClick={() => setSelectedLocalKeys(localCandidates.map(candidate => candidate.key))}>全选</button>
-                <button className="btn btn-sm" onClick={() => setSelectedLocalKeys([])}>清空</button>
-                <button className="btn btn-primary btn-sm" onClick={() => { void installSelectedLocalSkills(); }} disabled={localLoading || !selectedLocalKeys.length}>
-                  导入选中
-                </button>
+        {activeImportMethod === 'github' && (
+          <div className="skill-import-panel">
+            <div className="skill-import-panel-copy">输入 GitHub 仓库地址或 SKILL.md 原始链接，自动同步技能定义。</div>
+            <div className="flex gap-2 skill-import-row">
+              <input
+                value={ghUrl}
+                onChange={e => setGhUrl(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleImportFromGitHub(); }}
+                placeholder="https://github.com/user/skill-repo 或 raw URL"
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '.8em', flex: 1 }}
+              />
+              <button className="btn btn-primary" onClick={handleImportFromGitHub} disabled={ghLoading}>
+                {ghLoading ? '导入中...' : '导入'}
+              </button>
+            </div>
+            {ghMsg && (
+              <div className="mt-2" style={{
+                fontSize: '.8em',
+                color: ghMsg.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
+              }}>
+                {ghMsg}
               </div>
-            </div>
-            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-              {localCandidates.map(candidate => {
-                const exists = skills.some(s => s.name === candidate.name);
-                return (
-                  <label
-                    key={candidate.key}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'auto 1fr auto',
-                      gap: 10,
-                      alignItems: 'start',
-                      padding: '9px 10px',
-                      borderBottom: '1px solid var(--border)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedLocalKeys.includes(candidate.key)}
-                      onChange={() => toggleLocalCandidate(candidate.key)}
-                      style={{ width: 'auto', marginTop: 3 }}
-                    />
-                    <span>
-                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.82em', fontWeight: 600 }}>
-                        {candidate.name}
-                      </span>
-                      <span style={{ display: 'block', fontSize: '.75em', color: 'var(--ink-secondary)', marginTop: 2 }}>
-                        {candidate.description}
-                      </span>
-                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.68em', color: 'var(--ink-muted)', marginTop: 2 }}>
-                        {candidate.displayPath}
-                      </span>
-                    </span>
-                    {exists && <span className="badge badge-warning">将覆盖</span>}
-                  </label>
-                );
-              })}
-            </div>
+            )}
           </div>
         )}
-        {localMsg && (
-          <div className="mt-2" style={{
-            fontSize: '.8em',
-            color: localMsg.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
-          }}>
-            {localMsg}
-          </div>
-        )}
-      </div>
 
-      <div className="card mb-4">
-        <div className="card-header">从 Workspace 抽取技能</div>
-        <div style={{ fontSize: '.82em', color: 'var(--ink-secondary)', marginBottom: 10 }}>
-          粘贴会话链接或输入对话 ID，系统会从该对话的 workspace 自动扫描你创建的可学习技能
-        </div>
-        <div className="flex gap-2" style={{ alignItems: 'flex-start' }}>
-          <input
-            value={workspaceConversationId}
-            onChange={e => setWorkspaceConversationId(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleScanWorkspacePath(); }}
-            placeholder="会话链接或对话 ID"
-            style={{ fontFamily: 'var(--font-mono)', fontSize: '.8em', flex: 1 }}
-          />
-          <button className="btn btn-primary" onClick={handleScanWorkspacePath} disabled={workspaceLoading}>
-            {workspaceLoading ? '扫描中...' : '扫描'}
-          </button>
-        </div>
-        {workspaceCandidates.length > 0 && (
-          <div className="mt-3" style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-            <div className="flex-between" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '.82em', fontWeight: 600 }}>
-                Workspace 候选 {selectedWorkspacePaths.length}/{workspaceCandidates.length}
-              </span>
-              <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
-                <button className="btn btn-sm" onClick={selectAllWorkspaceCandidates}>全选</button>
-                <button className="btn btn-sm" onClick={() => setSelectedWorkspacePaths([])}>清空</button>
-                <button className="btn btn-primary btn-sm" onClick={installSelectedWorkspaceSkills} disabled={workspaceLoading}>
-                  安装选中
-                </button>
-              </div>
+        {activeImportMethod === 'local' && (
+          <div className="skill-import-panel">
+            <div className="skill-import-panel-copy">选择本机路径，或手动输入技能目录 / SKILL.md 路径后扫描。</div>
+            <div className="flex gap-2 mb-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+              <button className="btn btn-primary" onClick={() => { void handlePickLocalPath('directory'); }} disabled={localLoading}>
+                {localLoading ? '处理中...' : '选择目录'}
+              </button>
+              <button className="btn" onClick={() => { void handlePickLocalPath('file'); }} disabled={localLoading}>
+                选择 SKILL.md
+              </button>
             </div>
-            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-              {workspaceCandidates.map(skill => {
-                const exists = skills.some(item => item.name === skill.name);
-                const willOverwrite = exists || skill.installed === true;
-                const sourcePath = candidatePath(skill);
-                return (
-                  <label
-                    key={sourcePath}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: 'auto 1fr auto',
-                      gap: 10,
-                      alignItems: 'start',
-                      padding: '9px 10px',
-                      borderBottom: '1px solid var(--border)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedWorkspacePaths.includes(sourcePath)}
-                      onChange={() => toggleWorkspaceCandidate(sourcePath)}
-                      style={{ width: 'auto', marginTop: 3 }}
-                    />
-                    <span>
-                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.82em', fontWeight: 600 }}>
-                        {skill.name}
-                      </span>
-                      <span style={{ display: 'block', fontSize: '.75em', color: 'var(--ink-secondary)', marginTop: 2 }}>
-                        {skill.description}
-                      </span>
-                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.68em', color: 'var(--ink-muted)', marginTop: 2 }}>
-                        来自对话 {workspaceConversationLabel}
-                      </span>
-                      {skill.installedPath && (
-                        <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.68em', color: 'var(--success)', marginTop: 2 }}>
-                          已安装到 {skill.installedPath}
+            <div className="flex gap-2 skill-import-row">
+              <input
+                value={localPath}
+                onChange={e => setLocalPath(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleScanLocalPath(); }}
+                placeholder="/Users/xiaoqin/.codex/skills 或 /path/to/SKILL.md"
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '.8em', flex: 1 }}
+              />
+              <button className="btn btn-primary" onClick={handleScanLocalPath} disabled={localLoading || !localPath.trim()}>
+                {localLoading ? '扫描中...' : '扫描路径'}
+              </button>
+            </div>
+            {localCandidates.length > 0 && (
+              <div className="mt-3" style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+                <div className="flex-between" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '.82em', fontWeight: 600 }}>
+                    候选技能 {selectedLocalPaths.length}/{localCandidates.length}
+                  </span>
+                  <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                    <button className="btn btn-sm" onClick={() => setSelectedLocalPaths(localCandidates.map(skill => skill.path))}>全选</button>
+                    <button className="btn btn-sm" onClick={() => setSelectedLocalPaths([])}>清空</button>
+                    <button className="btn btn-primary btn-sm" onClick={() => { void installSelectedLocalSkills(); }} disabled={localLoading || !selectedLocalPaths.length}>
+                      导入选中
+                    </button>
+                  </div>
+                </div>
+                <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                  {localCandidates.map(skill => {
+                    const exists = skills.some(s => s.name === skill.name);
+                    return (
+                      <label
+                        key={skill.path}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'auto 1fr auto',
+                          gap: 10,
+                          alignItems: 'start',
+                          padding: '9px 10px',
+                          borderBottom: '1px solid var(--border)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedLocalPaths.includes(skill.path)}
+                          onChange={() => toggleLocalCandidate(skill.path)}
+                          style={{ width: 'auto', marginTop: 3 }}
+                        />
+                        <span>
+                          <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.82em', fontWeight: 600 }}>
+                            {skill.name}
+                          </span>
+                          <span style={{ display: 'block', fontSize: '.75em', color: 'var(--ink-secondary)', marginTop: 2 }}>
+                            {skill.description}
+                          </span>
+                          <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.68em', color: 'var(--ink-muted)', marginTop: 2 }}>
+                            {skill.path}
+                          </span>
                         </span>
-                      )}
-                    </span>
-                    {willOverwrite && <span className="badge badge-warning">将覆盖</span>}
-                  </label>
-                );
-              })}
-            </div>
+                        {exists && <span className="badge badge-muted">已存在</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {localMsg && (
+              <div className="mt-2" style={{
+                fontSize: '.8em',
+                color: localMsg.startsWith('✓') ? 'var(--success)' : 'var(--danger)',
+              }}>
+                {localMsg}
+              </div>
+            )}
           </div>
         )}
-        {workspaceMsg && (
-          <div className="mt-2" style={{
-            fontSize: '.8em',
-            color: workspaceMsg.startsWith('✓') ? 'var(--success)' : workspaceMsg.includes('失败') ? 'var(--warning)' : 'var(--danger)',
-          }}>
-            {workspaceMsg}
+
+        {activeImportMethod === 'workspace' && (
+          <div className="skill-import-panel">
+            <div className="skill-import-panel-copy">粘贴会话链接或输入对话 ID，系统会从该对话的 workspace 扫描你创建的可学习技能。</div>
+            <div className="flex gap-2 skill-import-row">
+              <input
+                value={workspaceConversationId}
+                onChange={e => setWorkspaceConversationId(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleScanWorkspacePath(); }}
+                placeholder="会话链接或对话 ID"
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '.8em', flex: 1 }}
+              />
+              <button className="btn btn-primary" onClick={handleScanWorkspacePath} disabled={workspaceLoading}>
+                {workspaceLoading ? '扫描中...' : '扫描'}
+              </button>
+            </div>
+            {workspaceCandidates.length > 0 && (
+              <div className="mt-3" style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+                <div className="flex-between" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg-hover)', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '.82em', fontWeight: 600 }}>
+                    Workspace 候选 {selectedWorkspacePaths.length}/{workspaceCandidates.length}
+                  </span>
+                  <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                    <button className="btn btn-sm" onClick={selectAllWorkspaceCandidates}>全选</button>
+                    <button className="btn btn-sm" onClick={() => setSelectedWorkspacePaths([])}>清空</button>
+                    <button className="btn btn-primary btn-sm" onClick={installSelectedWorkspaceSkills} disabled={workspaceLoading}>
+                      安装选中
+                    </button>
+                  </div>
+                </div>
+                <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                  {workspaceCandidates.map(skill => {
+                    const exists = skills.some(item => item.name === skill.name);
+                    const willOverwrite = exists || skill.installed === true;
+                    const sourcePath = candidatePath(skill);
+                    return (
+                      <label
+                        key={sourcePath}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'auto 1fr auto',
+                          gap: 10,
+                          alignItems: 'start',
+                          padding: '9px 10px',
+                          borderBottom: '1px solid var(--border)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedWorkspacePaths.includes(sourcePath)}
+                          onChange={() => toggleWorkspaceCandidate(sourcePath)}
+                          style={{ width: 'auto', marginTop: 3 }}
+                        />
+                        <span>
+                          <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.82em', fontWeight: 600 }}>
+                            {skill.name}
+                          </span>
+                          <span style={{ display: 'block', fontSize: '.75em', color: 'var(--ink-secondary)', marginTop: 2 }}>
+                            {skill.description}
+                          </span>
+                          <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.68em', color: 'var(--ink-muted)', marginTop: 2 }}>
+                            来自对话 {workspaceConversationLabel}
+                          </span>
+                          {skill.installedPath && (
+                            <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: '.68em', color: 'var(--success)', marginTop: 2 }}>
+                              已安装到 {skill.installedPath}
+                            </span>
+                          )}
+                        </span>
+                        {willOverwrite && <span className="badge badge-warning">将覆盖</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {workspaceMsg && (
+              <div className="mt-2" style={{
+                fontSize: '.8em',
+                color: workspaceMsg.startsWith('✓') ? 'var(--success)' : workspaceMsg.includes('失败') ? 'var(--warning)' : 'var(--danger)',
+              }}>
+                {workspaceMsg}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -936,9 +928,9 @@ export default function Skills() {
           <div className="kpi-sub">个技能</div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-label">已启用</div>
-          <div className="kpi-value" style={{ color: 'var(--success)' }}>{enabledCount}</div>
-          <div className="kpi-sub">{skills.length - enabledCount} 个未启用</div>
+          <div className="kpi-label">可用状态</div>
+          <div className="kpi-value" style={{ color: 'var(--success)', fontSize: '.9em' }}>默认可用</div>
+          <div className="kpi-sub">删除后才会移除</div>
         </div>
         <div className="kpi-card">
           <div className="kpi-label">位置分布</div>
@@ -972,8 +964,7 @@ export default function Skills() {
                   key={skill.name}
                   className="tool-card"
                   style={{
-                    borderColor: skill.enabled ? 'var(--success)' : 'var(--border)',
-                    opacity: skill.enabled ? 1 : .6,
+                    borderColor: 'var(--border)',
                   }}
                 >
                   <div className="flex-between">
@@ -997,13 +988,6 @@ export default function Skills() {
                       </div>
                     </div>
                     <div className="flex gap-2" style={{ flexDirection: 'column', alignItems: 'center' }}>
-                      <StatusBadge status={skill.enabled ? 'success' : 'disabled'} label={skill.enabled ? '启用' : '禁用'} />
-                      <button
-                        className={`btn btn-sm ${skill.enabled ? 'btn-danger' : 'btn-primary'}`}
-                        onClick={() => toggleSkill(skill.name)}
-                      >
-                        {skill.enabled ? '停用' : '启用'}
-                      </button>
                       {canPublish && skill.location === 'user' && (
                         <button
                           className="btn btn-sm"

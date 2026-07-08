@@ -492,13 +492,13 @@ export function getDefaultOptions(): SdkOptions {
 export const DEFAULT_SKILLS: SkillInfo[] = [
   { name: 'pdf', description: '处理和解析 PDF 文档', location: 'user', path: '~/.claude/skills/pdf/', enabled: true },
   { name: 'docx', description: '读写 Word 文档 (.docx)', location: 'user', path: '~/.claude/skills/docx/', enabled: true },
-  { name: 'xlsx', description: '读写 Excel 电子表格', location: 'user', path: '~/.claude/skills/xlsx/', enabled: false },
-  { name: 'pptx', description: '创建和编辑 PPT 演示文稿', location: 'user', path: '~/.claude/skills/pptx/', enabled: false },
+  { name: 'xlsx', description: '读写 Excel 电子表格', location: 'user', path: '~/.claude/skills/xlsx/', enabled: true },
+  { name: 'pptx', description: '创建和编辑 PPT 演示文稿', location: 'user', path: '~/.claude/skills/pptx/', enabled: true },
   { name: 'agentma-visual', description: '把内容渲染成可预览和保存的 HTML/Markdown 可视化', location: 'user', path: '~/.claude/skills/agentma-visual/', enabled: true },
   { name: 'code-review', description: '自动化代码审查助手', location: 'project', path: '.claude/skills/code-review/', enabled: true },
-  { name: 'i18n-helper', description: '国际化翻译辅助工具', location: 'project', path: '.claude/skills/i18n-helper/', enabled: false },
+  { name: 'i18n-helper', description: '国际化翻译辅助工具', location: 'project', path: '.claude/skills/i18n-helper/', enabled: true },
   { name: 'api-doc-gen', description: '从代码生成 API 文档', location: 'project', path: '.claude/skills/api-doc-gen/', enabled: true },
-  { name: 'db-migration', description: '数据库迁移脚本生成器', location: 'project', path: '.claude/skills/db-migration/', enabled: false },
+  { name: 'db-migration', description: '数据库迁移脚本生成器', location: 'project', path: '.claude/skills/db-migration/', enabled: true },
   { name: 'docker-helper', description: 'Docker 容器管理助手', location: 'plugin', path: '~/.claude/plugins/docker/skills/', enabled: true },
   { name: 'git-assistant', description: 'Git 工作流辅助', location: 'plugin', path: '~/.claude/plugins/git/skills/', enabled: true },
 ];
@@ -510,10 +510,11 @@ export function initSkills(): SkillInfo[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return DEFAULT_SKILLS;
-      const existingNames = new Set(parsed.map((skill: SkillInfo) => skill?.name).filter(Boolean));
+      const normalized = parsed.map((skill: SkillInfo) => ({ ...skill, enabled: true }));
+      const existingNames = new Set(normalized.map((skill: SkillInfo) => skill?.name).filter(Boolean));
       const missingDefaults = DEFAULT_SKILLS.filter((skill) => !existingNames.has(skill.name));
-      const merged = missingDefaults.length ? [...parsed, ...missingDefaults] : parsed;
-      if (missingDefaults.length) localStorage.setItem(key, JSON.stringify(merged));
+      const merged = missingDefaults.length ? [...normalized, ...missingDefaults] : normalized;
+      if (missingDefaults.length || JSON.stringify(parsed) !== JSON.stringify(merged)) localStorage.setItem(key, JSON.stringify(merged));
       return merged;
     }
   } catch {}
@@ -523,7 +524,7 @@ export function initSkills(): SkillInfo[] {
 }
 
 export function saveSkills(skills: SkillInfo[]) {
-  localStorage.setItem('agentma_skills', JSON.stringify(skills));
+  localStorage.setItem('agentma_skills', JSON.stringify(skills.map(skill => ({ ...skill, enabled: true }))));
 }
 
 // --- 自定义工具持久化 ---

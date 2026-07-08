@@ -495,7 +495,7 @@ function createInstallSkillInfo(skillFile: string, skillDir: string, options: { 
     description,
     location: 'user' as const,
     path: `${skillDir}${path.sep}`,
-    enabled: false,
+    enabled: true,
   };
 }
 
