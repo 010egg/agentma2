@@ -1880,9 +1880,6 @@ export default function Conversations() {
       {((currentAgent?.knowledgeSourceIds || []).length > 0 || currentAgent?.useKnowledge) && (
         <span className="badge badge-success">知识库×{(currentAgent?.knowledgeSourceIds || []).length || '全部'}</span>
       )}
-      <span className={agentToolSummary.servers.length > 0 ? 'badge badge-success' : 'badge badge-muted'}>
-        MCP×{agentToolSummary.servers.length}
-      </span>
       {agentToolSummary.tools.length === 0 && <span className="badge badge-muted">无工具</span>}
     </>
   );
@@ -1895,17 +1892,10 @@ export default function Conversations() {
       {((currentAgent?.knowledgeSourceIds || []).length > 0 || currentAgent?.useKnowledge) && (
         <span className="badge badge-success">知识库×{(currentAgent?.knowledgeSourceIds || []).length || '全部'}</span>
       )}
-      {agentToolSummary.servers.length > 0 ? (
-        <span className="badge" style={{ background: 'var(--success-bg)', color: 'var(--success)' }}>
-          MCP ×{agentToolSummary.servers.length}
-        </span>
-      ) : (
-        <span className="badge badge-muted">MCP ×0</span>
-      )}
       {agentToolSummary.servers.map(server => (
         <span key={server.name} className="conversation-mcp-server">
           <span className="badge badge-muted">
-            {server.name} ({server.toolCount}工具)
+            {server.name}
           </span>
           {server.endpointUrl && <McpStatusDot server={server.name} endpoint={server.endpointUrl} />}
         </span>
@@ -2278,9 +2268,9 @@ export default function Conversations() {
               className={`conversation-mobile-panel${mobileMoreOpen ? ' open' : ''}`}
             >
               <div className="conversation-mobile-section">
-                <div className="conversation-mobile-section-title">模型与上下文</div>
+                <div className="conversation-mobile-section-title">上下文与视觉</div>
                 <div className="conversation-mobile-control-row">
-                  {renderAgentControls()}
+                  {renderAgentControls({ showModel: false })}
                 </div>
               </div>
               <div className="conversation-mobile-section">

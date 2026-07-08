@@ -2816,17 +2816,11 @@ label {
   }
 
   .composer-model-picker {
-    flex: 1 1 auto;
-    max-width: calc(100vw - 112px);
+    display: none;
   }
 
-  .composer-model-picker .chat-model-picker {
-    width: 100%;
-  }
-
-  .composer-model-picker .chat-model-picker select {
-    width: 100%;
-    max-width: none;
+  .agent-chat-model-picker {
+    display: none;
   }
 
   .composer-send-btn {

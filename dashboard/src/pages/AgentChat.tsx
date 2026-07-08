@@ -839,13 +839,15 @@ export default function AgentChat() {
           </div>
         </div>
         <div className="flex gap-2 mt-2" style={{ flexWrap: 'wrap' }}>
-          <ChatModelPicker
-            value={displayModel}
-            templateModel={template.model}
-            models={modelOptions}
-            disabled={isStreaming}
-            onChange={model => setSelectedModelOverride({ contextKey: modelContextKey, model })}
-          />
+          <div className="agent-chat-model-picker">
+            <ChatModelPicker
+              value={displayModel}
+              templateModel={template.model}
+              models={modelOptions}
+              disabled={isStreaming}
+              onChange={model => setSelectedModelOverride({ contextKey: modelContextKey, model })}
+            />
+          </div>
           <ContextWindowMeter
             model={displayModel}
             inputTokens={observedRunStats?.inTok}
