@@ -844,10 +844,6 @@ label {
 .chat-markdown th { background: var(--bg-hover); font-weight: 600; }
 
 .chat-scroll-bottom {
-  position: absolute;
-  right: 20px;
-  bottom: 82px;
-  z-index: 6;
   width: 36px;
   height: 36px;
   display: inline-flex;
@@ -863,15 +859,19 @@ label {
   font-weight: 600;
   line-height: 1;
   padding: 0;
-  opacity: .36;
-  transform: translateY(0);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(3px);
   backdrop-filter: blur(8px);
-  transition: opacity .15s, transform .15s, background .15s, border-color .15s, box-shadow .15s;
+  transition: opacity .15s, transform .15s, background .15s, border-color .15s, box-shadow .15s, visibility .15s;
 }
 
 .chat-scroll-bottom.is-visible {
   opacity: 1;
-  transform: translateY(-3px);
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .chat-scroll-bottom:hover,
@@ -880,6 +880,14 @@ label {
   border-color: var(--ink);
   background: var(--bg-card);
   box-shadow: 0 8px 22px rgba(28, 25, 23, 0.18);
+}
+
+.composer-scroll-bottom-row {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .knowledge-graph-backdrop {
@@ -1158,6 +1166,18 @@ label {
 .chat-input-area {
   padding: 14px 20px; border-top: 1px solid var(--border);
   display: flex; gap: 10px;
+}
+
+.chat-input-area.chat-input-area-stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.chat-input-controls {
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
 }
 
 .chat-input-area textarea {
@@ -4479,11 +4499,6 @@ tr:hover td {
 
   .copy-btn {
     opacity: 1 !important;
-  }
-
-  .chat-scroll-bottom {
-    right: 14px;
-    bottom: 80px;
   }
 
   .conversation-header {

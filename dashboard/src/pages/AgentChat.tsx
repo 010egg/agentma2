@@ -980,18 +980,6 @@ export default function AgentChat() {
 
           <div ref={bottomRef} />
         </div>
-        {messages.length > 0 && (
-          <button
-            type="button"
-            className={`chat-scroll-bottom${showScrollBottom ? ' is-visible' : ''}`}
-            onClick={scrollToBottom}
-            aria-label="回到底部"
-            title="回到底部"
-          >
-            <span aria-hidden="true">↓</span>
-          </button>
-        )}
-
         <div style={{ padding: '0 12px', maxHeight: '42vh', overflowY: 'auto', flexShrink: 0 }}>
           <AskUserQuestionPromptList
             pending={pendingQuestions}
@@ -1003,9 +991,9 @@ export default function AgentChat() {
           />
         </div>
 
-        <div className="chat-input-area">
+        <div className="chat-input-area chat-input-area-stacked">
           {(attachments.length > 0 || attachmentError) && (
-            <div style={{ padding: '4px 0' }}>
+            <div style={{ padding: '4px 0', width: '100%' }}>
               {attachmentError && <div style={{ color: 'var(--danger)', fontSize: '.75em', marginBottom: 4 }}>{attachmentError}</div>}
               {attachments.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -1041,69 +1029,84 @@ export default function AgentChat() {
             onChange={e => void handleFilePicked(e.currentTarget.files)}
             style={{ display: 'none' }}
           />
-          <button
-            className="btn"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isStreaming}
-            title="上传文件"
-            aria-label="上传文件"
-            style={{ width: 34, height: 34, minWidth: 34, padding: 0, borderRadius: 6, fontSize: 20, lineHeight: '30px' }}
-          >
-            +
-          </button>
-          <div className="composer-suggestion-field">
-            {nextSuggestion.suggestionText && !input.trim() && (
+          {messages.length > 0 && showScrollBottom && (
+            <div className="composer-scroll-bottom-row">
               <button
                 type="button"
-                className="composer-ghost-suggestion"
-                onClick={handleApplySuggestion}
-                disabled={isStreaming}
-                aria-label={`应用推荐回复：${nextSuggestion.suggestionText}`}
-                title="应用推荐回复"
+                className="chat-scroll-bottom is-visible"
+                onClick={scrollToBottom}
+                aria-label="回到底部"
+                title="回到底部"
               >
-                <span className="composer-suggestion-text">{nextSuggestion.suggestionText}</span>
-                <kbd className="composer-suggestion-key-hint">Tab 应用</kbd>
-                <span className="composer-suggestion-touch-hint" aria-hidden="true">点击应用</span>
+                <span aria-hidden="true">↓</span>
+              </button>
+            </div>
+          )}
+          <div className="chat-input-controls">
+            <button
+              className="btn"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isStreaming}
+              title="上传文件"
+              aria-label="上传文件"
+              style={{ width: 34, height: 34, minWidth: 34, padding: 0, borderRadius: 6, fontSize: 20, lineHeight: '30px' }}
+            >
+              +
+            </button>
+            <div className="composer-suggestion-field">
+              {nextSuggestion.suggestionText && !input.trim() && (
+                <button
+                  type="button"
+                  className="composer-ghost-suggestion"
+                  onClick={handleApplySuggestion}
+                  disabled={isStreaming}
+                  aria-label={`应用推荐回复：${nextSuggestion.suggestionText}`}
+                  title="应用推荐回复"
+                >
+                  <span className="composer-suggestion-text">{nextSuggestion.suggestionText}</span>
+                  <kbd className="composer-suggestion-key-hint">Tab 应用</kbd>
+                  <span className="composer-suggestion-touch-hint" aria-hidden="true">点击应用</span>
+                </button>
+              )}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={e => {
+                  if (!e.target.value.trim()) nextSuggestion.abandonAcceptedSuggestion();
+                  setInput(e.target.value);
+                  e.target.style.height = 'auto';
+                  e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+                }}
+                onKeyDown={e => {
+                  const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                  if (e.key === 'Tab' && !e.shiftKey && !isComposing && nextSuggestion.suggestionText && !input.trim()) {
+                    e.preventDefault();
+                    handleApplySuggestion();
+                    return;
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
+                    e.preventDefault();
+                    void handleSend();
+                  }
+                }}
+                onCompositionStart={() => { isInputComposingRef.current = true; }}
+                onCompositionEnd={() => { isInputComposingRef.current = false; }}
+                onPaste={e => void handlePaste(e)}
+                placeholder={nextSuggestion.suggestionText ? '' : '输入消息，Enter 发送，Shift+Enter 换行，可粘贴图片，也可上传文件'}
+                style={{ resize: 'none', overflowY: 'hidden', minHeight: 38, maxHeight: 200 }}
+                disabled={isStreaming}
+              />
+            </div>
+            {isStreaming ? (
+              <button className="btn btn-danger" onClick={handleStop}>
+                {isWaitingPhase(runPhase) ? '停止等待' : '停止'}
+              </button>
+            ) : (
+              <button className="btn btn-primary" onClick={handleSend} disabled={!input.trim() && attachments.length === 0}>
+                发送
               </button>
             )}
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={e => {
-                if (!e.target.value.trim()) nextSuggestion.abandonAcceptedSuggestion();
-                setInput(e.target.value);
-                e.target.style.height = 'auto';
-                e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
-              }}
-              onKeyDown={e => {
-                const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-                if (e.key === 'Tab' && !e.shiftKey && !isComposing && nextSuggestion.suggestionText && !input.trim()) {
-                  e.preventDefault();
-                  handleApplySuggestion();
-                  return;
-                }
-                if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
-                  e.preventDefault();
-                  void handleSend();
-                }
-              }}
-              onCompositionStart={() => { isInputComposingRef.current = true; }}
-              onCompositionEnd={() => { isInputComposingRef.current = false; }}
-              onPaste={e => void handlePaste(e)}
-              placeholder={nextSuggestion.suggestionText ? '' : '输入消息，Enter 发送，Shift+Enter 换行，可粘贴图片，也可上传文件'}
-              style={{ resize: 'none', overflowY: 'hidden', minHeight: 38, maxHeight: 200 }}
-              disabled={isStreaming}
-            />
           </div>
-          {isStreaming ? (
-            <button className="btn btn-danger" onClick={handleStop}>
-              {isWaitingPhase(runPhase) ? '停止等待' : '停止'}
-            </button>
-          ) : (
-            <button className="btn btn-primary" onClick={handleSend} disabled={!input.trim() && attachments.length === 0}>
-              发送
-            </button>
-          )}
         </div>
       </div>
     </div>

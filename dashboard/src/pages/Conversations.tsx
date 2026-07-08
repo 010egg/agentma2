@@ -2372,18 +2372,6 @@ export default function Conversations() {
               )}
               <div ref={bottomRef} />
             </div>
-            {messages.length > 0 && (
-              <button
-                type="button"
-                className={`chat-scroll-bottom${showScrollBottom ? ' is-visible' : ''}`}
-                onClick={scrollToBottom}
-                aria-label="回到底部"
-                title="回到底部"
-              >
-                <span aria-hidden="true">↓</span>
-              </button>
-            )}
-
             <div className="conversation-prompts">
               <AskUserQuestionPromptList
                 pending={pendingQuestions}
@@ -2449,6 +2437,19 @@ export default function Conversations() {
                   onChange={e => void handleFilePicked(e.currentTarget.files)}
                   style={{ display: 'none' }}
                 />
+                {messages.length > 0 && showScrollBottom && (
+                  <div className="composer-scroll-bottom-row">
+                    <button
+                      type="button"
+                      className="chat-scroll-bottom is-visible"
+                      onClick={scrollToBottom}
+                      aria-label="回到底部"
+                      title="回到底部"
+                    >
+                      <span aria-hidden="true">↓</span>
+                    </button>
+                  </div>
+                )}
                 <div className="conversation-composer-input-row composer-suggestion-field">
                   {nextSuggestion.suggestionText && !input.trim() && (
                     <button
