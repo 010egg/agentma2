@@ -33,6 +33,7 @@ export type UserRow = {
   name: string;
   tenantId: string;
   role: Role;
+  inputSuggestionModel: string;
   createdAt: number;
 };
 
@@ -225,6 +226,43 @@ export type ChatHistorySession = {
   collaborationUpdatedAt?: number;
   createdAt: number;
   updatedAt: number;
+};
+
+export type ChatSuggestionStatus = 'shown' | 'accepted' | 'sent' | 'dismissed' | 'abandoned';
+
+export type ChatSuggestionEventRow = {
+  id: string;
+  tenantId: string;
+  ownerSub: string;
+  sessionId: string;
+  templateId: string;
+  suggestionText: string;
+  suggestionType: string;
+  status: ChatSuggestionStatus;
+  shownAt: number;
+  acceptedAt?: number;
+  sentAt?: number;
+  dismissedAt?: number;
+  abandonedAt?: number;
+  editedBeforeSend?: boolean;
+  finalTextLength?: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ChatSuggestionPreferenceSummary = {
+  shown: number;
+  accepted: number;
+  sent: number;
+  dismissed: number;
+  abandoned: number;
+  acceptanceRate: number;
+  sentRate: number;
+  editRate: number;
+  averageAcceptedLength: number;
+  acceptedExamples: string[];
+  sentExamples: string[];
+  dismissedExamples: string[];
 };
 
 export type KnowledgeSourceRow = {
@@ -458,6 +496,7 @@ function initSchema() {
       password_hash TEXT NOT NULL,
       tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
+      input_suggestion_model TEXT,
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users (tenant_id);
@@ -559,6 +598,29 @@ function initSchema() {
       PRIMARY KEY (session_id, seq)
     );
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session_seq ON chat_messages (session_id, seq);
+
+    CREATE TABLE IF NOT EXISTS chat_suggestions (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      owner_sub TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      template_id TEXT NOT NULL DEFAULT '',
+      suggestion_text TEXT NOT NULL,
+      suggestion_type TEXT NOT NULL DEFAULT 'next_step',
+      status TEXT NOT NULL,
+      shown_at INTEGER NOT NULL,
+      accepted_at INTEGER,
+      sent_at INTEGER,
+      dismissed_at INTEGER,
+      abandoned_at INTEGER,
+      edited_before_send INTEGER NOT NULL DEFAULT 0,
+      final_text_length INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_suggestions_owner_updated ON chat_suggestions (tenant_id, owner_sub, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_chat_suggestions_session_updated ON chat_suggestions (tenant_id, owner_sub, session_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_chat_suggestions_template_updated ON chat_suggestions (tenant_id, owner_sub, template_id, updated_at DESC);
 
     CREATE TABLE IF NOT EXISTS permission_rules (
       tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -686,6 +748,7 @@ function initSchema() {
   `);
   ensureColumn('users', 'id', 'TEXT');
   ensureColumn('users', 'username', 'TEXT');
+  ensureColumn('users', 'input_suggestion_model', 'TEXT');
   backfillUserIdentityColumns();
   migrateOwnerSubsToUserIds();
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_id ON users (id)');
@@ -1144,6 +1207,7 @@ function mapUser(row: any): UserRow {
     name: row.name,
     tenantId: row.tenant_id,
     role: row.role,
+    inputSuggestionModel: row.input_suggestion_model || '',
     createdAt: row.created_at,
   };
 }
@@ -1425,7 +1489,7 @@ function mapChatSessionSummary(row: any, viewerSub?: string): ChatHistorySession
 
 function getUserWithPassword(email: string) {
   return db.prepare(`
-    SELECT id, username, email, name, password_hash, tenant_id, role, created_at
+    SELECT id, username, email, name, password_hash, tenant_id, role, input_suggestion_model, created_at
     FROM users
     WHERE email = ?
   `).get(email) as {
@@ -1436,13 +1500,14 @@ function getUserWithPassword(email: string) {
     password_hash: string;
     tenant_id: string;
     role: Role;
+    input_suggestion_model?: string | null;
     created_at: number;
   } | undefined;
 }
 
 function getUser(email: string) {
   const row = db.prepare(`
-    SELECT id, username, email, name, tenant_id, role, created_at
+    SELECT id, username, email, name, tenant_id, role, input_suggestion_model, created_at
     FROM users
     WHERE email = ?
   `).get(email);
@@ -1451,7 +1516,7 @@ function getUser(email: string) {
 
 function getUserById(id: string) {
   const row = db.prepare(`
-    SELECT id, username, email, name, tenant_id, role, created_at
+    SELECT id, username, email, name, tenant_id, role, input_suggestion_model, created_at
     FROM users
     WHERE id = ?
   `).get(id);
@@ -1641,6 +1706,7 @@ export function loginUser(email: string, password: string) {
       name: user.name,
       tenantId: user.tenant_id,
       role: user.role,
+      inputSuggestionModel: user.input_suggestion_model || '',
       createdAt: user.created_at,
     },
   };
@@ -1656,9 +1722,28 @@ export function getMe(identity: AuthIdentity) {
     tenantId: identity.tenantId,
     name: user?.name,
     role: user?.role || identity.role || undefined,
+    inputSuggestionModel: user?.inputSuggestionModel || '',
     plan: tenant?.plan,
     region: tenant?.region,
   };
+}
+
+export function updateUserPreferences(
+  tenantId: string,
+  sub: string,
+  patch: { inputSuggestionModel?: string },
+) {
+  const user = getUserBySubject(sub);
+  if (!user || user.tenantId !== tenantId) return null;
+  const inputSuggestionModel = typeof patch.inputSuggestionModel === 'string'
+    ? patch.inputSuggestionModel.trim().slice(0, 200)
+    : user.inputSuggestionModel;
+  db.prepare(`
+    UPDATE users
+    SET input_suggestion_model = ?
+    WHERE tenant_id = ? AND id = ?
+  `).run(inputSuggestionModel || null, tenantId, user.id);
+  return getUserById(user.id);
 }
 
 export function updateTenant(tenantId: string, patch: { name?: string; plan?: string }) {
@@ -1672,7 +1757,7 @@ export function updateTenant(tenantId: string, patch: { name?: string; plan?: st
 
 export function listUsers(tenantId: string) {
   const rows = db.prepare(`
-    SELECT id, username, email, name, tenant_id, role, created_at
+    SELECT id, username, email, name, tenant_id, role, input_suggestion_model, created_at
     FROM users
     WHERE tenant_id = ?
     ORDER BY created_at ASC
@@ -3163,6 +3248,211 @@ export function getTenantById(tenantId: string) {
 
 export function getDataLocation() {
   return { dataDir: DATA_DIR, dbPath: DB_PATH };
+}
+
+function normalizeChatSuggestionStatus(value: unknown): ChatSuggestionStatus {
+  const status = String(value || '').trim();
+  return ['shown', 'accepted', 'sent', 'dismissed', 'abandoned'].includes(status)
+    ? status as ChatSuggestionStatus
+    : 'shown';
+}
+
+function mapChatSuggestion(row: any): ChatSuggestionEventRow {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    ownerSub: row.owner_sub,
+    sessionId: row.session_id,
+    templateId: row.template_id || '',
+    suggestionText: row.suggestion_text || '',
+    suggestionType: row.suggestion_type || 'next_step',
+    status: normalizeChatSuggestionStatus(row.status),
+    shownAt: row.shown_at,
+    acceptedAt: row.accepted_at || undefined,
+    sentAt: row.sent_at || undefined,
+    dismissedAt: row.dismissed_at || undefined,
+    abandonedAt: row.abandoned_at || undefined,
+    editedBeforeSend: Boolean(row.edited_before_send),
+    finalTextLength: Number.isFinite(Number(row.final_text_length)) ? Number(row.final_text_length) : undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function getChatSuggestionRow(tenantId: string, ownerSub: string, id: string): ChatSuggestionEventRow | null {
+  const row = db.prepare(`
+    SELECT *
+    FROM chat_suggestions
+    WHERE tenant_id = ? AND owner_sub = ? AND id = ?
+  `).get(tenantId, ownerSub, id);
+  return row ? mapChatSuggestion(row) : null;
+}
+
+function normalizeSuggestionText(value: unknown) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+export function recordChatSuggestionShown(
+  tenantId: string,
+  ownerSub: string,
+  input: {
+    id?: string;
+    sessionId: string;
+    templateId?: string;
+    suggestionText: string;
+    suggestionType?: string;
+  },
+): ChatSuggestionEventRow {
+  const timestamp = now();
+  const id = String(input.id || crypto.randomUUID());
+  const text = normalizeSuggestionText(input.suggestionText);
+  if (!text) throw new Error('suggestionText is required');
+  db.prepare(`
+    INSERT INTO chat_suggestions (
+      id, tenant_id, owner_sub, session_id, template_id, suggestion_text,
+      suggestion_type, status, shown_at, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'shown', ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      suggestion_text = excluded.suggestion_text,
+      suggestion_type = excluded.suggestion_type,
+      status = 'shown',
+      shown_at = excluded.shown_at,
+      accepted_at = NULL,
+      sent_at = NULL,
+      dismissed_at = NULL,
+      abandoned_at = NULL,
+      edited_before_send = 0,
+      final_text_length = NULL,
+      updated_at = excluded.updated_at
+  `).run(
+    id,
+    tenantId,
+    ownerSub,
+    String(input.sessionId || ''),
+    String(input.templateId || ''),
+    text,
+    String(input.suggestionType || 'next_step').slice(0, 40) || 'next_step',
+    timestamp,
+    timestamp,
+    timestamp,
+  );
+  return getChatSuggestionRow(tenantId, ownerSub, id)!;
+}
+
+export function updateChatSuggestionStatus(
+  tenantId: string,
+  ownerSub: string,
+  id: string,
+  input: {
+    status: Exclude<ChatSuggestionStatus, 'shown'>;
+    editedBeforeSend?: boolean;
+    finalTextLength?: number;
+  },
+): ChatSuggestionEventRow | null {
+  const existing = getChatSuggestionRow(tenantId, ownerSub, id);
+  if (!existing) return null;
+  if (existing.status === 'sent' && input.status !== 'sent') return existing;
+  const timestamp = now();
+  const status = normalizeChatSuggestionStatus(input.status);
+  const finalTextLength = Number(input.finalTextLength);
+  const safeFinalTextLength = Number.isFinite(finalTextLength) && finalTextLength >= 0
+    ? Math.min(10000, Math.round(finalTextLength))
+    : existing.finalTextLength ?? null;
+  const editedBeforeSend = typeof input.editedBeforeSend === 'boolean'
+    ? input.editedBeforeSend
+    : Boolean(existing.editedBeforeSend);
+
+  db.prepare(`
+    UPDATE chat_suggestions
+    SET status = ?,
+      accepted_at = CASE WHEN ? IN ('accepted', 'sent', 'abandoned') AND accepted_at IS NULL THEN ? ELSE accepted_at END,
+      sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END,
+      dismissed_at = CASE WHEN ? = 'dismissed' THEN ? ELSE dismissed_at END,
+      abandoned_at = CASE WHEN ? = 'abandoned' THEN ? ELSE abandoned_at END,
+      edited_before_send = CASE WHEN ? = 'sent' THEN ? ELSE edited_before_send END,
+      final_text_length = CASE WHEN ? = 'sent' THEN ? ELSE final_text_length END,
+      updated_at = ?
+    WHERE tenant_id = ? AND owner_sub = ? AND id = ?
+  `).run(
+    status,
+    status,
+    timestamp,
+    status,
+    timestamp,
+    status,
+    timestamp,
+    status,
+    timestamp,
+    status,
+    editedBeforeSend ? 1 : 0,
+    status,
+    safeFinalTextLength,
+    timestamp,
+    tenantId,
+    ownerSub,
+    id,
+  );
+  return getChatSuggestionRow(tenantId, ownerSub, id);
+}
+
+export function getChatSuggestionPreferenceSummary(
+  tenantId: string,
+  ownerSub: string,
+  templateId?: string,
+): ChatSuggestionPreferenceSummary {
+  const params: unknown[] = [tenantId, ownerSub];
+  let templateWhere = '';
+  const normalizedTemplateId = String(templateId || '').trim();
+  if (normalizedTemplateId) {
+    templateWhere = 'AND template_id = ?';
+    params.push(normalizedTemplateId);
+  }
+  const rows = db.prepare(`
+    SELECT suggestion_text, status, edited_before_send, final_text_length, updated_at
+    FROM chat_suggestions
+    WHERE tenant_id = ? AND owner_sub = ?
+      ${templateWhere}
+    ORDER BY updated_at DESC
+    LIMIT 200
+  `).all(...params) as Array<{
+    suggestion_text: string;
+    status: string;
+    edited_before_send: number;
+    final_text_length: number | null;
+  }>;
+
+  const acceptedStatuses = new Set(['accepted', 'sent', 'abandoned']);
+  const acceptedRows = rows.filter(row => acceptedStatuses.has(normalizeChatSuggestionStatus(row.status)));
+  const sentRows = rows.filter(row => normalizeChatSuggestionStatus(row.status) === 'sent');
+  const dismissedRows = rows.filter(row => normalizeChatSuggestionStatus(row.status) === 'dismissed');
+  const abandonedRows = rows.filter(row => normalizeChatSuggestionStatus(row.status) === 'abandoned');
+  const acceptedLengths = acceptedRows
+    .map(row => Number(row.final_text_length) || normalizeSuggestionText(row.suggestion_text).length)
+    .filter(length => Number.isFinite(length) && length > 0);
+  const editedSent = sentRows.filter(row => Boolean(row.edited_before_send)).length;
+  const exampleTexts = (sourceRows: typeof rows) => Array.from(new Set(
+    sourceRows
+      .map(row => normalizeSuggestionText(row.suggestion_text))
+      .filter(Boolean),
+  )).slice(0, 5);
+
+  return {
+    shown: rows.length,
+    accepted: acceptedRows.length,
+    sent: sentRows.length,
+    dismissed: dismissedRows.length,
+    abandoned: abandonedRows.length,
+    acceptanceRate: rows.length ? acceptedRows.length / rows.length : 0,
+    sentRate: rows.length ? sentRows.length / rows.length : 0,
+    editRate: sentRows.length ? editedSent / sentRows.length : 0,
+    averageAcceptedLength: acceptedLengths.length
+      ? Math.round(acceptedLengths.reduce((sum, length) => sum + length, 0) / acceptedLengths.length)
+      : 0,
+    acceptedExamples: exampleTexts(acceptedRows),
+    sentExamples: exampleTexts(sentRows),
+    dismissedExamples: exampleTexts(dismissedRows),
+  };
 }
 
 // ═══ Provider Profiles (tenant-shared) ═══

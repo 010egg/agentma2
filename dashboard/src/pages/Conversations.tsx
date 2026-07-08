@@ -16,6 +16,7 @@ import { appendAssistantDraft, finalizeAssistantDraft, updateAssistantDraft } fr
 import { findPendingRunMessage, observeServerRun } from '../utils/chat-run-events';
 import { chatRunStatsFromResultEvent, latestAssistantRunStats } from '../utils/chat-run-stats';
 import { fetchProviderModels, listProviderModels, loadProviderProfiles, resolveProviderForModel } from '../utils/providers';
+import { useChatNextSuggestion } from '../utils/chat-suggestions';
 import JsonViewer from '../components/common/JsonViewer';
 import ChatMessageBubble from '../components/ChatMessageBubble';
 import WaitingHint from '../components/WaitingHint';
@@ -311,6 +312,19 @@ export default function Conversations() {
   const structuredOutput = activeRunUi?.structuredOutput ?? null;
   const runStats = activeRunUi?.runStats || null;
   const observedRunStats = runStats || (!isStreaming ? latestAssistantRunStats(messages) : null);
+  const suggestionModel = user?.inputSuggestionModel?.trim() || '';
+  const suggestionProvider = useMemo(() => suggestionModel ? resolveProviderForModel(suggestionModel).provider : undefined, [suggestionModel]);
+  const nextSuggestion = useChatNextSuggestion({
+    sessionId: activeSessionId,
+    templateId: activeSession?.templateId || currentAgent?.id,
+    template: currentAgent,
+    model: suggestionModel,
+    provider: suggestionProvider,
+    messages,
+    composerInput: input,
+    attachments,
+    disabled: isStreaming || isSessionDetailLoading || pendingPermissions.length > 0 || pendingQuestions.length > 0,
+  });
   const isWelcomeState = messages.length === 0 && !isSessionDetailLoading && !sessionLoadError && !isStreaming;
   const agentToolSummary = useMemo(() => {
     const tools = currentAgent?.tools || [];
@@ -1487,6 +1501,7 @@ export default function Conversations() {
     const content = input.trim();
     const messageAttachments = attachments;
     if ((!content && messageAttachments.length === 0) || isStreaming || isSessionDetailLoading || !currentAgent) return;
+    nextSuggestion.markAcceptedSuggestionSent(content);
 
     const sendModel = selectedModel || activeSession?.model || currentAgent.model;
     provider.current = resolveProviderForModel(sendModel).provider;
@@ -1779,12 +1794,28 @@ export default function Conversations() {
     patchSessionRunUi,
     setSessionMessages,
     updateSessionRunPhase,
+    nextSuggestion,
   ]);
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return;
     runAbortControllersRef.current.get(activeSessionId)?.abort();
   }, [activeSessionId]);
+
+  const handleApplySuggestion = useCallback(() => {
+    const accepted = nextSuggestion.acceptSuggestion();
+    if (!accepted) return false;
+    setInput(accepted.text);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(accepted.text.length, accepted.text.length);
+      textarea.style.height = 'auto';
+      textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    });
+    return true;
+  }, [nextSuggestion]);
 
   const renderAgentControls = (options: { showModel?: boolean; showContext?: boolean; showVisual?: boolean } = {}) => {
     if (!currentAgent) return null;
@@ -2428,14 +2459,30 @@ export default function Conversations() {
                   onChange={e => void handleFilePicked(e.currentTarget.files)}
                   style={{ display: 'none' }}
                 />
-                <div className="conversation-composer-input-row">
+                <div className="conversation-composer-input-row composer-suggestion-field">
+                  {nextSuggestion.suggestionText && !input.trim() && (
+                    <div className="composer-ghost-suggestion" aria-hidden="true">
+                      <span>{nextSuggestion.suggestionText}</span>
+                      <kbd>Tab 应用</kbd>
+                    </div>
+                  )}
                   <textarea
                     ref={textareaRef}
                     className="conversation-composer-input"
                     value={input}
-                    onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'; }}
+                    onChange={e => {
+                      if (!e.target.value.trim()) nextSuggestion.abandonAcceptedSuggestion();
+                      setInput(e.target.value);
+                      e.target.style.height = 'auto';
+                      e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+                    }}
                     onKeyDown={e => {
                       const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                      if (e.key === 'Tab' && !e.shiftKey && !isComposing && nextSuggestion.suggestionText && !input.trim()) {
+                        e.preventDefault();
+                        handleApplySuggestion();
+                        return;
+                      }
                       if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
                         e.preventDefault();
                         void handleSend();
@@ -2444,7 +2491,7 @@ export default function Conversations() {
                     onCompositionStart={() => { isInputComposingRef.current = true; }}
                     onCompositionEnd={() => { isInputComposingRef.current = false; }}
                     onPaste={handlePaste}
-                    placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+                    placeholder={nextSuggestion.suggestionText ? '' : '输入消息，Enter 发送，Shift+Enter 换行'}
                     disabled={isStreaming || isSessionDetailLoading}
                   />
                 </div>

@@ -22,6 +22,7 @@ import { appendAssistantDraft, finalizeAssistantDraft, updateAssistantDraft } fr
 import { findPendingRunMessage, observeServerRun } from '../utils/chat-run-events';
 import { chatRunStatsFromResultEvent, latestAssistantRunStats } from '../utils/chat-run-stats';
 import { fetchProviderModels, listProviderModels, loadProviderProfiles, resolveProviderForModel } from '../utils/providers';
+import { useChatNextSuggestion } from '../utils/chat-suggestions';
 import JsonViewer from '../components/common/JsonViewer';
 import ChatMessageBubble from '../components/ChatMessageBubble';
 import ChatModelPicker from '../components/ChatModelPicker';
@@ -124,7 +125,21 @@ export default function AgentChat() {
   const provider = useRef<ProviderConfig>(resolveProviderForModel().provider);
   const modelContextKey = `${id || ''}:${sessionId || resumeSessionId || 'new'}`;
   const selectedModel = selectedModelOverride?.contextKey === modelContextKey ? selectedModelOverride.model : '';
+  const effectiveChatModel = selectedModel || sessionMeta?.model || template?.model || '';
+  const suggestionModel = user?.inputSuggestionModel?.trim() || '';
+  const suggestionProvider = useMemo(() => suggestionModel ? resolveProviderForModel(suggestionModel).provider : undefined, [suggestionModel]);
   const pendingRunMessage = useMemo(() => findPendingRunMessage(messages), [messages]);
+  const nextSuggestion = useChatNextSuggestion({
+    sessionId,
+    templateId: sessionMeta?.templateId || template?.id,
+    template,
+    model: suggestionModel,
+    provider: suggestionProvider,
+    messages,
+    composerInput: input,
+    attachments,
+    disabled: isStreaming || pendingPermissions.length > 0 || pendingQuestions.length > 0,
+  });
   const focusChatInput = useCallback(() => {
     requestAnimationFrame(() => {
       if (!textareaRef.current || textareaRef.current.disabled) return;
@@ -518,6 +533,7 @@ export default function AgentChat() {
     const content = input.trim();
     const messageAttachments = attachments;
     if ((!content && messageAttachments.length === 0) || isStreaming || !template) return;
+    nextSuggestion.markAcceptedSuggestionSent(content);
     const effectiveModel = selectedModel || sessionMeta?.model || template.model || '';
     provider.current = resolveProviderForModel(effectiveModel).provider;
 
@@ -782,17 +798,32 @@ export default function AgentChat() {
       }
     }
     finishRun();
-  }, [input, attachments, isStreaming, template, messages, persistSession, selectedModel, sessionMeta, sessionId, id, visualPreprocessEnabled, visualPreprocessModel]);
+  }, [input, attachments, isStreaming, template, nextSuggestion, messages, persistSession, selectedModel, sessionMeta, sessionId, id, visualPreprocessEnabled, visualPreprocessModel]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
   }, []);
 
+  const handleApplySuggestion = useCallback(() => {
+    const accepted = nextSuggestion.acceptSuggestion();
+    if (!accepted) return false;
+    setInput(accepted.text);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(accepted.text.length, accepted.text.length);
+      textarea.style.height = 'auto';
+      textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    });
+    return true;
+  }, [nextSuggestion]);
+
   if (!template) {
     return <div className="page-header"><h1>加载中...</h1></div>;
   }
 
-  const displayModel = selectedModel || sessionMeta?.model || template.model || '';
+  const displayModel = effectiveChatModel;
   const observedRunStats = runStats || (!isStreaming ? latestAssistantRunStats(messages) : null);
 
   return (
@@ -1018,24 +1049,42 @@ export default function AgentChat() {
           >
             +
           </button>
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'; }}
-            onKeyDown={e => {
-              const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-              if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
-                e.preventDefault();
-                void handleSend();
-              }
-            }}
-            onCompositionStart={() => { isInputComposingRef.current = true; }}
-            onCompositionEnd={() => { isInputComposingRef.current = false; }}
-            onPaste={e => void handlePaste(e)}
-            placeholder="输入消息，Enter 发送，Shift+Enter 换行，可粘贴图片，也可上传文件"
-            style={{ resize: 'none', overflowY: 'hidden', minHeight: 38, maxHeight: 200 }}
-            disabled={isStreaming}
-          />
+          <div className="composer-suggestion-field">
+            {nextSuggestion.suggestionText && !input.trim() && (
+              <div className="composer-ghost-suggestion" aria-hidden="true">
+                <span>{nextSuggestion.suggestionText}</span>
+                <kbd>Tab 应用</kbd>
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={e => {
+                if (!e.target.value.trim()) nextSuggestion.abandonAcceptedSuggestion();
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+              }}
+              onKeyDown={e => {
+                const isComposing = isInputComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                if (e.key === 'Tab' && !e.shiftKey && !isComposing && nextSuggestion.suggestionText && !input.trim()) {
+                  e.preventDefault();
+                  handleApplySuggestion();
+                  return;
+                }
+                if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
+                  e.preventDefault();
+                  void handleSend();
+                }
+              }}
+              onCompositionStart={() => { isInputComposingRef.current = true; }}
+              onCompositionEnd={() => { isInputComposingRef.current = false; }}
+              onPaste={e => void handlePaste(e)}
+              placeholder={nextSuggestion.suggestionText ? '' : '输入消息，Enter 发送，Shift+Enter 换行，可粘贴图片，也可上传文件'}
+              style={{ resize: 'none', overflowY: 'hidden', minHeight: 38, maxHeight: 200 }}
+              disabled={isStreaming}
+            />
+          </div>
           {isStreaming ? (
             <button className="btn btn-danger" onClick={handleStop}>
               {isWaitingPhase(runPhase) ? '停止等待' : '停止'}

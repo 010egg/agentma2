@@ -28,6 +28,7 @@ import {
   getDataLocation,
   getDatasource,
   getMe,
+  getChatSuggestionPreferenceSummary,
   getLatestAgentRuntimeSession,
   getQuota,
   getQuotaUsageSummary,
@@ -66,6 +67,7 @@ import {
   replacePermissionRules,
   replaceProviderProfiles,
   replaceAgentTemplates,
+  recordChatSuggestionShown,
   resolveProviderProfileForModel,
   revokeApiKey,
   saveChatSession,
@@ -74,10 +76,12 @@ import {
   testKnowledgeSource,
   updateChatSession,
   updateChatSessionCollaboration,
+  updateChatSuggestionStatus,
   updateInternalToolSetting,
   updatePublicSkill,
   updateQuota,
   updateTenant,
+  updateUserPreferences,
   updateUserRole,
 } from './server-store.ts';
 import {
@@ -263,6 +267,161 @@ function normalizeStringArray(value: unknown) {
     return trimmed ? [trimmed] : [];
   });
   return Array.from(new Set(normalized));
+}
+
+const CHAT_SUGGESTION_TIMEOUT_MS = 6500;
+const CHAT_SUGGESTION_MAX_HISTORY_CHARS = 5200;
+const CHAT_SUGGESTION_MAX_SYSTEM_PROMPT_CHARS = 1200;
+const CHAT_SUGGESTION_MAX_OUTPUT_CHARS = 48;
+const CHAT_SUGGESTION_MAX_MODEL_TOKENS = 320;
+
+function buildAnthropicMessagesUrl(baseUrl: string | undefined) {
+  const trimmed = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return 'https://api.anthropic.com/v1/messages';
+  if (/\/v1\/messages$/i.test(trimmed)) return trimmed;
+  if (/\/v1$/i.test(trimmed)) return `${trimmed}/messages`;
+  return `${trimmed}/v1/messages`;
+}
+
+function extractModelResponseText(data: unknown) {
+  if (!data || typeof data !== 'object') return '';
+  const content = (data as { content?: unknown }).content;
+  if (!Array.isArray(content)) return '';
+  return content.flatMap((block) => {
+    if (!block || typeof block !== 'object') return [];
+    const text = (block as { text?: unknown }).text;
+    return typeof text === 'string' && text.trim() ? [text.trim()] : [];
+  }).join('\n');
+}
+
+function summarizeHtmlModelResponse(raw: string, contentType: string) {
+  const trimmed = raw.trim();
+  if (!/html/i.test(contentType) && !/^<!doctype html/i.test(trimmed) && !/^<html[\s>]/i.test(trimmed)) return '';
+  const title = trimmed.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim();
+  return [
+    '模型网关返回了 HTML 页面而不是 JSON 响应。',
+    title ? `页面标题: ${title}。` : '',
+    '请检查 provider profile 的 Base URL 是否是 Anthropic-compatible API endpoint，而不是网页地址；也检查本机代理、Cloudflare 或网关鉴权是否拦截了请求。',
+  ].filter(Boolean).join(' ');
+}
+
+function cleanSuggestionText(value: unknown) {
+  let text = String(value || '').trim();
+  text = text.replace(/^```(?:\w+)?\s*/i, '').replace(/```$/i, '').trim();
+  text = text.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
+  text = text.replace(/^(建议|推荐|下一步)[:：]\s*/i, '').trim();
+  text = text.split(/\n+/).map(line => line.replace(/^[-*•\d.、)\s]+/, '').trim()).find(Boolean) || '';
+  text = text.replace(/\s+/g, ' ').trim();
+  if (text.length > CHAT_SUGGESTION_MAX_OUTPUT_CHARS) {
+    text = text.slice(0, CHAT_SUGGESTION_MAX_OUTPUT_CHARS).replace(/[，,。.；;：:\s]+$/g, '');
+  }
+  return text;
+}
+
+function compactChatHistoryForSuggestion(messages: Array<{ role?: string; content?: string; attachments?: unknown[] }>) {
+  const useful = messages
+    .filter(message => ['user', 'assistant', 'system'].includes(String(message.role || '')))
+    .map((message) => {
+      const role = String(message.role || 'user');
+      const content = String(message.content || '').replace(/\s+/g, ' ').trim();
+      const attachmentNote = Array.isArray(message.attachments) && message.attachments.length
+        ? ` [附件 x${message.attachments.length}]`
+        : '';
+      return content || attachmentNote ? `${role}: ${content}${attachmentNote}` : '';
+    })
+    .filter(Boolean);
+  const selected = useful.slice(-14);
+  let out = selected.join('\n');
+  if (out.length > CHAT_SUGGESTION_MAX_HISTORY_CHARS) {
+    out = out.slice(out.length - CHAT_SUGGESTION_MAX_HISTORY_CHARS);
+  }
+  return out;
+}
+
+function buildSuggestionPreferenceText(summary: ReturnType<typeof getChatSuggestionPreferenceSummary>) {
+  if (!summary.shown) return '';
+  const lines = [
+    `近 ${summary.shown} 次推荐中，采纳率 ${Math.round(summary.acceptanceRate * 100)}%，发送率 ${Math.round(summary.sentRate * 100)}%。`,
+  ];
+  if (summary.averageAcceptedLength) lines.push(`用户采纳的建议平均约 ${summary.averageAcceptedLength} 字。`);
+  if (summary.editRate > 0.35) lines.push('用户经常会编辑建议，优先给可改写的短句。');
+  if (summary.sentExamples.length) lines.push(`用户最终发送过的建议示例: ${summary.sentExamples.slice(0, 3).join(' / ')}`);
+  if (summary.dismissedExamples.length) lines.push(`用户较少采用的建议示例: ${summary.dismissedExamples.slice(0, 3).join(' / ')}`);
+  return lines.join('\n');
+}
+
+function buildChatSuggestionPrompt(input: {
+  agentName: string;
+  agentSystemPrompt?: string;
+  history: string;
+  preferenceText?: string;
+}) {
+  return [
+    '你是聊天输入框里的下一步推荐器。',
+    '根据当前对话历史、用户偏好和 Agent 目标，生成一句“用户可能想发给 AI 的下一条消息”。',
+    '',
+    '硬性要求:',
+    `- 只输出一句中文用户消息，${CHAT_SUGGESTION_MAX_OUTPUT_CHARS} 字以内。`,
+    '- 不要解释，不要加引号，不要 Markdown，不要项目符号。',
+    '- 直接输出最终消息，不要输出思考过程。',
+    '- 句子要具体、可执行，能自然填入输入框。',
+    '- 不要替用户承诺危险、不可逆、付费、删除、发送给第三方等操作。',
+    '- 不要输出寒暄、泛泛的“继续吗/还需要吗”。',
+    '',
+    `Agent: ${input.agentName || 'Agent'}`,
+    input.agentSystemPrompt ? `Agent 目标:\n${input.agentSystemPrompt.slice(0, CHAT_SUGGESTION_MAX_SYSTEM_PROMPT_CHARS)}` : '',
+    input.preferenceText ? `用户采用偏好:\n${input.preferenceText}` : '',
+    `最近对话:\n${input.history}`,
+    '',
+    '下一条用户消息:',
+  ].filter(Boolean).join('\n\n');
+}
+
+async function requestChatSuggestionModel(input: {
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+  prompt: string;
+}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CHAT_SUGGESTION_TIMEOUT_MS);
+  try {
+    const response = await fetch(buildAnthropicMessagesUrl(input.baseUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'x-api-key': input.apiKey,
+        authorization: `Bearer ${input.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: input.model,
+        max_tokens: CHAT_SUGGESTION_MAX_MODEL_TOKENS,
+        temperature: 0.35,
+        messages: [{ role: 'user', content: input.prompt }],
+      }),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    const htmlError = summarizeHtmlModelResponse(raw, response.headers.get('content-type') || '');
+    if (htmlError) throw new Error(response.ok ? htmlError : `推荐生成失败 HTTP ${response.status}: ${htmlError}`);
+    let parsed: unknown = raw;
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch {
+      parsed = raw;
+    }
+    if (!response.ok) {
+      const message = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+      throw new Error(`推荐生成失败 HTTP ${response.status}: ${message.slice(0, 800)}`);
+    }
+    return cleanSuggestionText(extractModelResponseText(parsed));
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') throw new Error(`推荐生成超时(${CHAT_SUGGESTION_TIMEOUT_MS / 1000}s)`, { cause: error });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 const MAX_SKILL_MD_BYTES = 512 * 1024;
@@ -2148,6 +2307,92 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   });
 });
 
+app.post('/api/chat/next-suggestion', authMiddleware, async (req: any, res) => {
+  const ownerSub = getChatOwnerSub(req.auth);
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+  if (!sessionId) { res.status(400).json({ error: 'sessionId required' }); return; }
+
+  const me = getMe(req.auth);
+  const selectedModel = typeof me.inputSuggestionModel === 'string' ? me.inputSuggestionModel.trim() : '';
+  if (!selectedModel) {
+    res.json({ suggestion: '' });
+    return;
+  }
+
+  const session = getChatSession(req.auth.tenantId, ownerSub, sessionId);
+  if (!session) { res.status(404).json({ error: 'session not found' }); return; }
+  if (!session.messages.some(message => message.content.trim())) {
+    res.json({ suggestion: '' });
+    return;
+  }
+
+  const templateId = [
+    req.body?.templateId,
+    session.templateId,
+  ].find(value => typeof value === 'string' && value.trim())?.trim() || '';
+  const template = templateId ? getVisibleAgentTemplate(req.auth, templateId) : null;
+  if (templateId && !template) { res.status(404).json({ error: 'agent not found' }); return; }
+
+  const runtimeProvider = resolveRuntimeProvider(req.auth.tenantId, selectedModel, undefined, undefined, req.body?.providerProfiles);
+  if (!runtimeProvider.apiKey) { res.status(400).json({ error: 'no ANTHROPIC_AUTH_TOKEN' }); return; }
+
+  const history = compactChatHistoryForSuggestion(session.messages);
+  if (!history.trim()) {
+    res.json({ suggestion: '' });
+    return;
+  }
+  const preference = getChatSuggestionPreferenceSummary(req.auth.tenantId, ownerSub, templateId);
+  const prompt = buildChatSuggestionPrompt({
+    agentName: typeof template?.name === 'string' ? template.name : 'Agent',
+    agentSystemPrompt: typeof template?.systemPrompt === 'string' ? template.systemPrompt : undefined,
+    history,
+    preferenceText: buildSuggestionPreferenceText(preference),
+  });
+
+  try {
+    const suggestion = await requestChatSuggestionModel({
+      model: selectedModel,
+      baseUrl: runtimeProvider.baseUrl,
+      apiKey: runtimeProvider.apiKey,
+      prompt,
+    });
+    if (!suggestion) {
+      res.json({ suggestion: '' });
+      return;
+    }
+    const recorded = recordChatSuggestionShown(req.auth.tenantId, ownerSub, {
+      id: crypto.randomUUID(),
+      sessionId,
+      templateId,
+      suggestionText: suggestion,
+      suggestionType: 'next_step',
+    });
+    res.json({
+      suggestionId: recorded.id,
+      suggestion: recorded.suggestionText,
+    });
+  } catch (error) {
+    console.warn('[chat-suggestion] failed', sessionId, (error as Error).message);
+    res.status(502).json({ error: (error as Error).message || '推荐生成失败' });
+  }
+});
+
+app.post('/api/chat/next-suggestion/:id/event', authMiddleware, (req: any, res) => {
+  const status = String(req.body?.status || '').trim();
+  if (!['accepted', 'sent', 'dismissed', 'abandoned'].includes(status)) {
+    res.status(400).json({ error: 'invalid status' });
+    return;
+  }
+  const finalTextLength = Number(req.body?.finalTextLength);
+  const updated = updateChatSuggestionStatus(req.auth.tenantId, getChatOwnerSub(req.auth), req.params.id, {
+    status: status as 'accepted' | 'sent' | 'dismissed' | 'abandoned',
+    editedBeforeSend: typeof req.body?.editedBeforeSend === 'boolean' ? req.body.editedBeforeSend : undefined,
+    finalTextLength: Number.isFinite(finalTextLength) ? finalTextLength : undefined,
+  });
+  if (!updated) { res.status(404).json({ error: 'suggestion not found' }); return; }
+  res.json({ ok: true, suggestionId: updated.id, status: updated.status });
+});
+
 app.get('/api/chat/runs/:id/events', authMiddleware, (req: any, res) => {
   const run = serverRuns.get(req.params.id);
   if (!run || run.tenantId !== req.auth.tenantId || run.ownerSub !== getChatOwnerSub(req.auth)) {
@@ -2334,6 +2579,7 @@ app.post('/api/auth/login', (req, res) => {
     name: result.user.name,
     tenantId: result.user.tenantId,
     role: result.user.role,
+    inputSuggestionModel: result.user.inputSuggestionModel || '',
   });
 });
 
@@ -2342,6 +2588,21 @@ app.get('/api/auth/me', (req, res) => {
   const auth = authenticateToken(token);
   if (!auth) { res.status(401).json({ error: '未登录' }); return; }
   res.json(getMe(auth));
+});
+
+app.patch('/api/account/preferences', authMiddleware, (req: any, res) => {
+  if (req.auth.authType !== 'jwt') {
+    res.status(403).json({ error: '需要用户登录后设置' });
+    return;
+  }
+  const user = updateUserPreferences(req.auth.tenantId, req.auth.sub, {
+    inputSuggestionModel: typeof req.body?.inputSuggestionModel === 'string' ? req.body.inputSuggestionModel : '',
+  });
+  if (!user) { res.status(404).json({ error: 'user not found' }); return; }
+  audit(req.auth.tenantId, 'update_account_preferences', req.auth.sub, 'user', `user:${user.id}`, {
+    inputSuggestionModel: user.inputSuggestionModel ? 'set' : 'cleared',
+  });
+  res.json(getMe(req.auth));
 });
 
 // ═══ Tenant Routes ═══

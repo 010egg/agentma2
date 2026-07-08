@@ -14,6 +14,7 @@ export type StoredAuthUser = {
   name: string;
   tenantId?: string;
   role?: 'tenant_admin' | 'team_admin' | 'member';
+  inputSuggestionModel?: string;
 };
 
 export function getStoredAuthUser(): StoredAuthUser | null {

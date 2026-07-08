@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { getAuthHeaders } from '../utils/client-runtime';
 import type { ProviderProfile } from '../simulator/types';
-import { createProviderProfile, loadProviderProfiles, mergeProviderProfiles, saveProviderProfiles, splitAvailableModels } from '../utils/providers';
+import { createProviderProfile, fetchProviderModels, listProviderModels, loadProviderProfiles, mergeProviderProfiles, saveProviderProfiles, splitAvailableModels } from '../utils/providers';
 import { normalizeRunOutcome, outcomeBadgeClass, outcomeLabel } from '../simulator/run-state';
+import { useAuth } from '../contexts/AuthContext';
 
 const jsonAuthHeaders = () => getAuthHeaders({ 'Content-Type': 'application/json' });
 
@@ -356,17 +357,67 @@ function ProviderManager() {
 }
 
 function TenantInfo() {
+  const { user, refreshUser } = useAuth();
   const [tenant, setTenant] = useState<any>(null);
   const [name, setName] = useState('');
+  const [suggestionModel, setSuggestionModel] = useState(() => user?.inputSuggestionModel || '');
+  const [modelOptions, setModelOptions] = useState<string[]>(() => listProviderModels());
+  const [preferenceSaving, setPreferenceSaving] = useState(false);
+  const [preferenceSaved, setPreferenceSaved] = useState(false);
+  const [preferenceError, setPreferenceError] = useState('');
   useEffect(() => { fetch('/api/tenant', { headers: getAuthHeaders() }).then(r => r.json()).then(d => { setTenant(d); setName(d.name || ''); }); }, []);
+  useEffect(() => { setSuggestionModel(user?.inputSuggestionModel || ''); }, [user?.inputSuggestionModel]);
+  useEffect(() => {
+    let cancelled = false;
+    void fetchProviderModels()
+      .then(models => {
+        if (!cancelled && models.length) setModelOptions(models);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
   const save = async () => {
     await fetch('/api/tenant', { method: 'PATCH', headers: jsonAuthHeaders(), body: JSON.stringify({ name }) });
     setTenant({ ...tenant, name });
   };
+  const saveSuggestionPreference = async () => {
+    setPreferenceSaving(true);
+    setPreferenceSaved(false);
+    setPreferenceError('');
+    try {
+      const r = await fetch('/api/account/preferences', {
+        method: 'PATCH',
+        headers: jsonAuthHeaders(),
+        body: JSON.stringify({ inputSuggestionModel: suggestionModel }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || '保存失败');
+      const nextModel = typeof body.inputSuggestionModel === 'string'
+        ? body.inputSuggestionModel
+        : suggestionModel.trim();
+      setSuggestionModel(nextModel);
+      await refreshUser();
+      setPreferenceSaved(true);
+    } catch (error) {
+      setPreferenceError((error as Error).message || '保存失败');
+    } finally {
+      setPreferenceSaving(false);
+    }
+  };
   if (!tenant) return null;
+  const suggestionModelOptions = Array.from(new Set([
+    suggestionModel.trim(),
+    ...modelOptions,
+  ].filter(Boolean)));
+  const savedSuggestionModel = user?.inputSuggestionModel?.trim() || '';
   return (
     <div className="card">
-      <div className="card-header">租户信息</div>
+      <div className="spread" style={{ alignItems: 'center', marginBottom: 12 }}>
+        <div className="card-header" style={{ marginBottom: 0 }}>租户信息</div>
+        <span className={`badge ${savedSuggestionModel ? 'badge-info' : 'badge-muted'}`}>
+          输入框推荐{savedSuggestionModel ? '已启用' : '未启用'}
+        </span>
+      </div>
       <div className="grid-2">
         <div className="form-group"><label>名称</label><input value={name} onChange={e => setName(e.target.value)} /></div>
         <div className="form-group"><label>ID</label><input value={tenant.id} readOnly /></div>
@@ -379,6 +430,35 @@ function TenantInfo() {
         <div className="form-group"><label>状态</label><input value={tenant.status} readOnly /></div>
       </div>
       <button className="btn btn-primary mt-2" onClick={save}>保存</button>
+
+      <div style={{ borderTop: '1px solid var(--border)', marginTop: 18, paddingTop: 16 }}>
+        <div className="section-title" style={{ marginBottom: 10 }}>输入框推荐</div>
+        <div className="grid-2" style={{ alignItems: 'end' }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>推荐模型</label>
+            <input
+              list="input-suggestion-model-options"
+              value={suggestionModel}
+              onChange={e => {
+                setSuggestionModel(e.target.value);
+                setPreferenceSaved(false);
+              }}
+              placeholder="留空关闭"
+            />
+            <datalist id="input-suggestion-model-options">
+              {suggestionModelOptions.map(model => <option key={model} value={model} />)}
+            </datalist>
+            <div className="kpi-sub">未设置时不会启用输入框推荐</div>
+          </div>
+          <div className="flex gap-2" style={{ alignItems: 'center', justifyContent: 'flex-start', minHeight: 38 }}>
+            <button className="btn btn-primary" onClick={saveSuggestionPreference} disabled={preferenceSaving}>
+              {preferenceSaving ? '保存中' : '保存推荐模型'}
+            </button>
+            {preferenceSaved && <span className="badge badge-success">已保存</span>}
+            {preferenceError && <span style={{ color: 'var(--danger)', fontSize: '.82em' }}>{preferenceError}</span>}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

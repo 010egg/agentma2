@@ -9,6 +9,7 @@ interface User {
   name: string;
   tenantId?: string;
   role?: 'tenant_admin' | 'team_admin' | 'member';
+  inputSuggestionModel?: string;
 }
 
 interface AuthContextType {
@@ -17,6 +18,7 @@ interface AuthContextType {
   isLoggedIn: boolean;
   login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   register: (name: string, email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  refreshUser: () => Promise<User | null>;
   logout: () => void;
 }
 
@@ -25,6 +27,19 @@ const AuthContext = createContext<AuthContextType | null>(null);
 function saveJwt(token: string) { localStorage.setItem('agentma_jwt', token); }
 function clearApiKey() { localStorage.removeItem('agentma_api_key'); }
 function saveUser(user: User) { localStorage.setItem('agentma_user', JSON.stringify(user)); }
+function buildAuthUser(data: any, fallback?: Partial<User> | null): User {
+  return {
+    id: data.id || fallback?.id,
+    username: data.username || fallback?.username,
+    email: data.email || fallback?.email || '',
+    name: data.name || fallback?.name || '',
+    tenantId: data.tenantId || fallback?.tenantId,
+    role: data.role || fallback?.role,
+    inputSuggestionModel: typeof data.inputSuggestionModel === 'string'
+      ? data.inputSuggestionModel
+      : fallback?.inputSuggestionModel || '',
+  };
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(() => {
@@ -41,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!token) return;
-    if (user?.tenantId && user?.role) return;
+    if (user?.tenantId && user?.role && user?.inputSuggestionModel !== undefined) return;
 
     let cancelled = false;
     const hydrate = async () => {
@@ -49,14 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
         if (!res.ok) return;
         const data = await res.json();
-        const nextUser: User = {
-          id: data.id || user?.id,
-          username: data.username || user?.username,
-          email: data.email || user?.email || '',
-          name: data.name || user?.name || '',
-          tenantId: data.tenantId || user?.tenantId,
-          role: data.role || user?.role,
-        };
+        const nextUser = buildAuthUser(data, user);
         if (cancelled) return;
         saveUser(nextUser);
         setUser(nextUser);
@@ -66,6 +74,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void hydrate();
     return () => { cancelled = true; };
   }, [token, user]);
+
+  const refreshUser = useCallback(async () => {
+    if (!getStoredAuthToken()) return null;
+    try {
+      const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const nextUser = buildAuthUser(data, getStoredAuthUser() || user);
+      saveUser(nextUser);
+      setUser(nextUser);
+      return nextUser;
+    } catch {
+      return null;
+    }
+  }, [user]);
 
   const login = useCallback(async (email: string, password: string) => {
     try {
@@ -78,9 +101,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!res.ok) return { ok: false, error: data.error || '登录失败' };
       clearApiKey();
       saveJwt(data.token);
-      saveUser({ id: data.id, username: data.username, email: data.email, name: data.name, tenantId: data.tenantId, role: data.role });
+      const nextUser = buildAuthUser(data, { email });
+      saveUser(nextUser);
       setToken(data.token);
-      setUser({ id: data.id, username: data.username, email: data.email, name: data.name, tenantId: data.tenantId, role: data.role });
+      setUser(nextUser);
       return { ok: true };
     } catch (e) { return { ok: false, error: (e as Error).message }; }
   }, []);
@@ -96,9 +120,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!res.ok) return { ok: false, error: data.error || '注册失败' };
       clearApiKey();
       saveJwt(data.token);
-      saveUser({ id: data.id, username: data.username, email: data.email, name: data.name, tenantId: data.tenantId, role: data.role });
+      const nextUser = buildAuthUser(data, { email, name });
+      saveUser(nextUser);
       setToken(data.token);
-      setUser({ id: data.id, username: data.username, email: data.email, name: data.name, tenantId: data.tenantId, role: data.role });
+      setUser(nextUser);
       return { ok: true };
     } catch (e) { return { ok: false, error: (e as Error).message }; }
   }, []);
@@ -112,7 +137,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoggedIn: !!token, login, register, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoggedIn: !!token, login, register, refreshUser, logout }}>
       {children}
     </AuthContext.Provider>
   );
