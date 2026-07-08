@@ -764,6 +764,25 @@ function scanLocalSkills(input: string) {
   return deduped.map(({ skillFile, skillDir }) => createLocalSkillInfo(skillFile, skillDir));
 }
 
+async function pickLocalSkillPath(kind: 'directory' | 'file') {
+  if (process.platform !== 'darwin') {
+    throw makeHttpError('当前系统暂不支持打开路径选择器，请手动输入路径后扫描', 501);
+  }
+
+  const script = kind === 'file'
+    ? 'POSIX path of (choose file with prompt "选择 SKILL.md 文件")'
+    : 'POSIX path of (choose folder with prompt "选择技能目录")';
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/osascript', ['-e', script], { timeout: 120000 });
+    return stdout.trim();
+  } catch (error) {
+    const err = error as Error & { stderr?: string };
+    const message = `${err.message || ''}\n${err.stderr || ''}`;
+    if (message.includes('-128') || /User canceled/i.test(message)) return '';
+    throw makeHttpError(`打开路径选择器失败: ${err.message || 'unknown error'}`, 500);
+  }
+}
+
 function parseConversationIdInput(input: string) {
   const trimmed = input.trim();
   if (!trimmed) return '';
@@ -3773,6 +3792,17 @@ app.post('/api/skills/scan-local', authMiddleware, (req: any, res) => {
   } catch (error) {
     const err = error as Error & { status?: number };
     res.status(err.status || 500).json({ error: err.message || '扫描失败' });
+  }
+});
+
+app.post('/api/skills/pick-local-path', authMiddleware, async (req: any, res) => {
+  try {
+    const kind = req.body?.kind === 'file' ? 'file' : 'directory';
+    const pickedPath = await pickLocalSkillPath(kind);
+    res.json({ path: pickedPath });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '选择路径失败' });
   }
 });
 

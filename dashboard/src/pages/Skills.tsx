@@ -251,8 +251,8 @@ export default function Skills() {
     void loadPublicSkills();
   }, [user?.tenantId]);
 
-  const handleScanLocalPath = async () => {
-    const inputPath = localPath.trim();
+  const scanLocalPath = async (pathToScan: string) => {
+    const inputPath = pathToScan.trim();
     if (!inputPath) return;
     setLocalLoading(true);
     setLocalMsg('');
@@ -289,6 +289,38 @@ export default function Skills() {
     } finally {
       setLocalLoading(false);
     }
+  };
+
+  const handlePickLocalPath = async (kind: 'directory' | 'file') => {
+    setLocalLoading(true);
+    setLocalMsg('');
+    try {
+      const res = await fetch('/api/skills/pick-local-path', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLocalMsg(`选择失败: ${data.error || `HTTP ${res.status}`}`);
+        return;
+      }
+      const pickedPath = String(data.path || '').trim();
+      if (!pickedPath) {
+        setLocalMsg('已取消选择路径');
+        return;
+      }
+      setLocalPath(pickedPath);
+      await scanLocalPath(pickedPath);
+    } catch (e) {
+      setLocalMsg(`选择失败: ${(e as Error).message}`);
+    } finally {
+      setLocalLoading(false);
+    }
+  };
+
+  const handleScanLocalPath = () => {
+    void scanLocalPath(localPath);
   };
 
   const toggleLocalCandidate = (skillPath: string) => {
@@ -672,9 +704,17 @@ export default function Skills() {
       </div>
 
       <div className="card mb-4">
-        <div className="card-header">从本地路径导入技能</div>
+        <div className="card-header">从本机导入技能</div>
         <div style={{ fontSize: '.82em', color: 'var(--ink-secondary)', marginBottom: 10 }}>
-          输入本机技能目录或 SKILL.md 路径，页面会读取元数据并加入技能列表
+          选择技能目录，或输入路径扫描。
+        </div>
+        <div className="flex gap-2 mb-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className="btn btn-primary" onClick={() => { void handlePickLocalPath('directory'); }} disabled={localLoading}>
+            {localLoading ? '处理中...' : '选择目录'}
+          </button>
+          <button className="btn" onClick={() => { void handlePickLocalPath('file'); }} disabled={localLoading}>
+            选择 SKILL.md
+          </button>
         </div>
         <div className="flex gap-2" style={{ alignItems: 'flex-start' }}>
           <input
@@ -685,7 +725,7 @@ export default function Skills() {
             style={{ fontFamily: 'var(--font-mono)', fontSize: '.8em', flex: 1 }}
           />
           <button className="btn btn-primary" onClick={handleScanLocalPath} disabled={localLoading}>
-            {localLoading ? '扫描中...' : '扫描'}
+            {localLoading ? '扫描中...' : '扫描路径'}
           </button>
         </div>
         {localCandidates.length > 0 && (
