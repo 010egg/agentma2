@@ -17,10 +17,24 @@ export const CHAT_FILE_ACCEPT = CHAT_FILE_EXTENSIONS.join(',');
 export const CHAT_IMAGE_ACCEPT = ['image/*', ...CHAT_IMAGE_INPUT_EXTENSIONS].join(',');
 export const CHAT_ATTACHMENT_ACCEPT = [CHAT_IMAGE_ACCEPT, CHAT_FILE_ACCEPT].join(',');
 
+export type ChatAttachmentUploadStatus = {
+  imageCount: number;
+  fileCount: number;
+};
+
 export function formatAttachmentBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function formatChatAttachmentUploadStatus(status: ChatAttachmentUploadStatus) {
+  const imageCount = Math.max(0, status.imageCount);
+  const fileCount = Math.max(0, status.fileCount);
+  const parts: string[] = [];
+  if (imageCount) parts.push(`${imageCount} 张图片`);
+  if (fileCount) parts.push(`${fileCount} 个文件`);
+  return `上传中 · ${parts.join(' / ') || '附件'}`;
 }
 
 export function getChatImageSrc(image: ChatImageAttachment): string {

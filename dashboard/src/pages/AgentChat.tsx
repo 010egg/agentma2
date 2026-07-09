@@ -43,9 +43,11 @@ import {
   CHAT_ATTACHMENT_ACCEPT,
   CHAT_FILE_MAX_COUNT,
   CHAT_IMAGE_MAX_COUNT,
+  formatChatAttachmentUploadStatus,
   formatAttachmentBytes,
   getChatImageSrc,
   splitChatUploadFiles,
+  type ChatAttachmentUploadStatus,
   uniqueChatImageFiles,
   uploadChatImages,
 } from '../utils/chat-attachments-ui';
@@ -106,6 +108,7 @@ export default function AgentChat() {
   const [runStats, setRunStats] = useState<ChatRunStats | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [attachmentUploadStatus, setAttachmentUploadStatus] = useState<ChatAttachmentUploadStatus | null>(null);
   const [collaborationError, setCollaborationError] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -120,6 +123,7 @@ export default function AgentChat() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isInputComposingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentUploadInFlightRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const observingRunIdRef = useRef('');
   const provider = useRef<ProviderConfig>(resolveProviderForModel().provider);
@@ -129,6 +133,7 @@ export default function AgentChat() {
   const suggestionModel = user?.inputSuggestionModel?.trim() || '';
   const suggestionProvider = useMemo(() => suggestionModel ? resolveProviderForModel(suggestionModel).provider : undefined, [suggestionModel]);
   const pendingRunMessage = useMemo(() => findPendingRunMessage(messages), [messages]);
+  const isAttachmentUploading = Boolean(attachmentUploadStatus);
   const nextSuggestion = useChatNextSuggestion({
     sessionId,
     templateId: sessionMeta?.templateId || template?.id,
@@ -138,7 +143,7 @@ export default function AgentChat() {
     messages,
     composerInput: input,
     attachments,
-    disabled: isStreaming || pendingPermissions.length > 0 || pendingQuestions.length > 0,
+    disabled: isStreaming || isAttachmentUploading || pendingPermissions.length > 0 || pendingQuestions.length > 0,
   });
   const focusChatInput = useCallback(() => {
     requestAnimationFrame(() => {
@@ -446,6 +451,10 @@ export default function AgentChat() {
     const pickedFiles = Array.from(fileList || []);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (!pickedFiles.length) return;
+    if (attachmentUploadInFlightRef.current || isAttachmentUploading) {
+      setAttachmentError('附件还在上传中，请稍等');
+      return;
+    }
     setAttachmentError('');
     const { images, files } = splitChatUploadFiles(pickedFiles);
 
@@ -468,27 +477,36 @@ export default function AgentChat() {
     if (files.length > remainingFiles) setAttachmentError(`最多一次发送 ${CHAT_FILE_MAX_COUNT} 个文件`);
     const nextAttachments: ChatAttachment[] = [];
     const errors: string[] = [];
-    if (acceptedImages.length) {
+    if (acceptedImages.length || acceptedFiles.length) {
+      attachmentUploadInFlightRef.current = true;
+      setAttachmentUploadStatus({ imageCount: acceptedImages.length, fileCount: acceptedFiles.length });
       try {
-        nextAttachments.push(...await uploadChatImages(acceptedImages));
-      } catch (error) {
-        errors.push((error as Error).message || '图片上传失败');
-      }
-    }
-    if (acceptedFiles.length) {
-      try {
-        const formData = new FormData();
-        for (const file of acceptedFiles) formData.append('files', file, file.name);
-        const response = await fetch('/api/chat/files/upload', {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: formData,
-        });
-        const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
-        if (!response.ok) throw new Error(data.error || `上传失败: ${response.status}`);
-        nextAttachments.push(...(Array.isArray(data.attachments) ? data.attachments : []));
-      } catch (error) {
-        errors.push((error as Error).message || '文件上传失败');
+        if (acceptedImages.length) {
+          try {
+            nextAttachments.push(...await uploadChatImages(acceptedImages));
+          } catch (error) {
+            errors.push((error as Error).message || '图片上传失败');
+          }
+        }
+        if (acceptedFiles.length) {
+          try {
+            const formData = new FormData();
+            for (const file of acceptedFiles) formData.append('files', file, file.name);
+            const response = await fetch('/api/chat/files/upload', {
+              method: 'POST',
+              headers: getAuthHeaders(),
+              body: formData,
+            });
+            const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
+            if (!response.ok) throw new Error(data.error || `上传失败: ${response.status}`);
+            nextAttachments.push(...(Array.isArray(data.attachments) ? data.attachments : []));
+          } catch (error) {
+            errors.push((error as Error).message || '文件上传失败');
+          }
+        }
+      } finally {
+        attachmentUploadInFlightRef.current = false;
+        setAttachmentUploadStatus(null);
       }
     }
     if (nextAttachments.length) {
@@ -497,7 +515,7 @@ export default function AgentChat() {
     if (errors.length) {
       setAttachmentError(errors[0]);
     }
-  }, [attachments]);
+  }, [attachments, isAttachmentUploading]);
 
   const handlePaste = useCallback(async (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(event.clipboardData?.items || []);
@@ -506,6 +524,11 @@ export default function AgentChat() {
       .map(item => item.getAsFile())
       .filter((file): file is File => Boolean(file)));
     if (!files.length) return;
+    if (attachmentUploadInFlightRef.current || isAttachmentUploading) {
+      event.preventDefault();
+      setAttachmentError('附件还在上传中，请稍等');
+      return;
+    }
     event.preventDefault();
     setAttachmentError('');
 
@@ -521,18 +544,23 @@ export default function AgentChat() {
       return;
     }
     if (files.length > remainingSlots) setAttachmentError(`最多一次发送 ${CHAT_IMAGE_MAX_COUNT} 张图片`);
+    attachmentUploadInFlightRef.current = true;
+    setAttachmentUploadStatus({ imageCount: accepted.length, fileCount: 0 });
     try {
       const nextAttachments = await uploadChatImages(accepted);
       setAttachments(prev => [...prev, ...nextAttachments]);
     } catch (error) {
       setAttachmentError((error as Error).message || '图片上传失败');
+    } finally {
+      attachmentUploadInFlightRef.current = false;
+      setAttachmentUploadStatus(null);
     }
-  }, [attachments]);
+  }, [attachments, isAttachmentUploading]);
 
   const handleSend = useCallback(async () => {
     const content = input.trim();
     const messageAttachments = attachments;
-    if ((!content && messageAttachments.length === 0) || isStreaming || !template) return;
+    if ((!content && messageAttachments.length === 0) || isStreaming || isAttachmentUploading || attachmentUploadInFlightRef.current || !template) return;
     nextSuggestion.markAcceptedSuggestionSent(content);
     const effectiveModel = selectedModel || sessionMeta?.model || template.model || '';
     provider.current = resolveProviderForModel(effectiveModel).provider;
@@ -798,7 +826,7 @@ export default function AgentChat() {
       }
     }
     finishRun();
-  }, [input, attachments, isStreaming, template, nextSuggestion, messages, persistSession, selectedModel, sessionMeta, sessionId, id, visualPreprocessEnabled, visualPreprocessModel]);
+  }, [input, attachments, isStreaming, isAttachmentUploading, template, nextSuggestion, messages, persistSession, selectedModel, sessionMeta, sessionId, id, visualPreprocessEnabled, visualPreprocessModel]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -992,11 +1020,17 @@ export default function AgentChat() {
         </div>
 
         <div className="chat-input-area chat-input-area-stacked">
-          {(attachments.length > 0 || attachmentError) && (
+          {(attachments.length > 0 || attachmentError || attachmentUploadStatus) && (
             <div style={{ padding: '4px 0', width: '100%' }}>
-              {attachmentError && <div style={{ color: 'var(--danger)', fontSize: '.75em', marginBottom: 4 }}>{attachmentError}</div>}
+              {attachmentError && <div className="composer-attachment-error">{attachmentError}</div>}
+              {attachmentUploadStatus && (
+                <div className="composer-upload-status" role="status" aria-live="polite">
+                  <span className="composer-upload-spinner" aria-hidden="true" />
+                  <span>{formatChatAttachmentUploadStatus(attachmentUploadStatus)}</span>
+                </div>
+              )}
               {attachments.length > 0 && (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <div className="composer-attachment-list" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {attachments.map(item => (
                     <div key={item.id} style={{ position: 'relative' }}>
                       {item.type === 'image' ? (
@@ -1027,6 +1061,7 @@ export default function AgentChat() {
             multiple
             accept={CHAT_ATTACHMENT_ACCEPT}
             onChange={e => void handleFilePicked(e.currentTarget.files)}
+            disabled={isStreaming || isAttachmentUploading}
             style={{ display: 'none' }}
           />
           {messages.length > 0 && showScrollBottom && (
@@ -1046,9 +1081,9 @@ export default function AgentChat() {
             <button
               className="btn"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-              title="上传文件"
-              aria-label="上传文件"
+              disabled={isStreaming || isAttachmentUploading}
+              title={isAttachmentUploading ? '附件上传中' : '上传文件'}
+              aria-label={isAttachmentUploading ? '附件上传中' : '上传文件'}
               style={{ width: 34, height: 34, minWidth: 34, padding: 0, borderRadius: 6, fontSize: 20, lineHeight: '30px' }}
             >
               +
@@ -1102,7 +1137,7 @@ export default function AgentChat() {
                 {isWaitingPhase(runPhase) ? '停止等待' : '停止'}
               </button>
             ) : (
-              <button className="btn btn-primary" onClick={handleSend} disabled={!input.trim() && attachments.length === 0}>
+              <button className="btn btn-primary" onClick={handleSend} disabled={isAttachmentUploading || (!input.trim() && attachments.length === 0)}>
                 发送
               </button>
             )}

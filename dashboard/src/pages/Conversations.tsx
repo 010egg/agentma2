@@ -39,9 +39,11 @@ import {
   CHAT_ATTACHMENT_ACCEPT,
   CHAT_FILE_MAX_COUNT,
   CHAT_IMAGE_MAX_COUNT,
+  formatChatAttachmentUploadStatus,
   formatAttachmentBytes,
   getChatImageSrc,
   splitChatUploadFiles,
+  type ChatAttachmentUploadStatus,
   uniqueChatImageFiles,
   uploadChatImages,
 } from '../utils/chat-attachments-ui';
@@ -287,6 +289,7 @@ export default function Conversations() {
   const [sessionRunUi, setSessionRunUi] = useState<Record<string, SessionRunUiState>>({});
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [attachmentUploadStatus, setAttachmentUploadStatus] = useState<ChatAttachmentUploadStatus | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -296,6 +299,7 @@ export default function Conversations() {
   const sessionLoadSeqRef = useRef(0);
   const isInputComposingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentUploadInFlightRef = useRef(false);
   const runAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const activeSessionIdRef = useRef<string | null>(null);
   const observingRunIdRef = useRef('');
@@ -319,6 +323,7 @@ export default function Conversations() {
   const observedRunStats = runStats || (!isStreaming ? latestAssistantRunStats(messages) : null);
   const suggestionModel = user?.inputSuggestionModel?.trim() || '';
   const suggestionProvider = useMemo(() => suggestionModel ? resolveProviderForModel(suggestionModel).provider : undefined, [suggestionModel]);
+  const isAttachmentUploading = Boolean(attachmentUploadStatus);
   const nextSuggestion = useChatNextSuggestion({
     sessionId: activeSessionId,
     templateId: activeSession?.templateId || currentAgent?.id,
@@ -328,7 +333,7 @@ export default function Conversations() {
     messages,
     composerInput: input,
     attachments,
-    disabled: isStreaming || isSessionDetailLoading || pendingPermissions.length > 0 || pendingQuestions.length > 0,
+    disabled: isStreaming || isAttachmentUploading || isSessionDetailLoading || pendingPermissions.length > 0 || pendingQuestions.length > 0,
   });
   const isWelcomeState = messages.length === 0 && !isSessionDetailLoading && !sessionLoadError && !isStreaming;
   const agentToolSummary = useMemo(() => {
@@ -1417,6 +1422,11 @@ export default function Conversations() {
     const files = uniqueChatImageFiles([...clipboardFiles, ...itemFiles]);
 
     if (!files.length) return;
+    if (attachmentUploadInFlightRef.current || isAttachmentUploading) {
+      event.preventDefault();
+      setAttachmentError('附件还在上传中，请稍等');
+      return;
+    }
     event.preventDefault();
     setAttachmentError('');
 
@@ -1436,18 +1446,27 @@ export default function Conversations() {
       return;
     }
 
+    attachmentUploadInFlightRef.current = true;
+    setAttachmentUploadStatus({ imageCount: accepted.length, fileCount: 0 });
     try {
       const nextAttachments = await uploadChatImages(accepted);
       setAttachments(prev => [...prev, ...nextAttachments]);
     } catch (error) {
       setAttachmentError((error as Error).message || '图片上传失败');
+    } finally {
+      attachmentUploadInFlightRef.current = false;
+      setAttachmentUploadStatus(null);
     }
-  }, [attachments]);
+  }, [attachments, isAttachmentUploading]);
 
   const handleFilePicked = useCallback(async (fileList: FileList | null) => {
     const pickedFiles = Array.from(fileList || []);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (!pickedFiles.length) return;
+    if (attachmentUploadInFlightRef.current || isAttachmentUploading) {
+      setAttachmentError('附件还在上传中，请稍等');
+      return;
+    }
     setAttachmentError('');
     const { images, files } = splitChatUploadFiles(pickedFiles);
 
@@ -1470,27 +1489,36 @@ export default function Conversations() {
     if (files.length > remainingFiles) setAttachmentError(`最多一次发送 ${CHAT_FILE_MAX_COUNT} 个文件`);
     const nextAttachments: ChatAttachment[] = [];
     const errors: string[] = [];
-    if (acceptedImages.length) {
+    if (acceptedImages.length || acceptedFiles.length) {
+      attachmentUploadInFlightRef.current = true;
+      setAttachmentUploadStatus({ imageCount: acceptedImages.length, fileCount: acceptedFiles.length });
       try {
-        nextAttachments.push(...await uploadChatImages(acceptedImages));
-      } catch (error) {
-        errors.push((error as Error).message || '图片上传失败');
-      }
-    }
-    if (acceptedFiles.length) {
-      try {
-        const formData = new FormData();
-        for (const file of acceptedFiles) formData.append('files', file, file.name);
-        const response = await fetch('/api/chat/files/upload', {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: formData,
-        });
-        const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
-        if (!response.ok) throw new Error(data.error || `上传失败: ${response.status}`);
-        nextAttachments.push(...(Array.isArray(data.attachments) ? data.attachments : []));
-      } catch (error) {
-        errors.push((error as Error).message || '文件上传失败');
+        if (acceptedImages.length) {
+          try {
+            nextAttachments.push(...await uploadChatImages(acceptedImages));
+          } catch (error) {
+            errors.push((error as Error).message || '图片上传失败');
+          }
+        }
+        if (acceptedFiles.length) {
+          try {
+            const formData = new FormData();
+            for (const file of acceptedFiles) formData.append('files', file, file.name);
+            const response = await fetch('/api/chat/files/upload', {
+              method: 'POST',
+              headers: getAuthHeaders(),
+              body: formData,
+            });
+            const data = await response.json().catch(() => ({})) as { attachments?: ChatAttachment[]; error?: string };
+            if (!response.ok) throw new Error(data.error || `上传失败: ${response.status}`);
+            nextAttachments.push(...(Array.isArray(data.attachments) ? data.attachments : []));
+          } catch (error) {
+            errors.push((error as Error).message || '文件上传失败');
+          }
+        }
+      } finally {
+        attachmentUploadInFlightRef.current = false;
+        setAttachmentUploadStatus(null);
       }
     }
     if (nextAttachments.length) {
@@ -1499,13 +1527,13 @@ export default function Conversations() {
     if (errors.length) {
       setAttachmentError(errors[0]);
     }
-  }, [attachments]);
+  }, [attachments, isAttachmentUploading]);
 
   // 发送消息
   const handleSend = useCallback(async () => {
     const content = input.trim();
     const messageAttachments = attachments;
-    if ((!content && messageAttachments.length === 0) || isStreaming || isSessionDetailLoading || !currentAgent) return;
+    if ((!content && messageAttachments.length === 0) || isStreaming || isAttachmentUploading || attachmentUploadInFlightRef.current || isSessionDetailLoading || !currentAgent) return;
     nextSuggestion.markAcceptedSuggestionSent(content);
 
     const sendModel = selectedModel || activeSession?.model || currentAgent.model;
@@ -1784,6 +1812,7 @@ export default function Conversations() {
     input,
     attachments,
     isStreaming,
+    isAttachmentUploading,
     isSessionDetailLoading,
     currentAgent,
     messages,
@@ -2421,9 +2450,15 @@ export default function Conversations() {
             {/* 输入区域 */}
             <div className="conversation-composer">
               <div className="chat-input-area conversation-composer-shell">
-                {(attachments.length > 0 || attachmentError) && (
+                {(attachments.length > 0 || attachmentError || attachmentUploadStatus) && (
                   <div className="composer-attachments">
                     {attachmentError && <div className="composer-attachment-error">{attachmentError}</div>}
+                    {attachmentUploadStatus && (
+                      <div className="composer-upload-status" role="status" aria-live="polite">
+                        <span className="composer-upload-spinner" aria-hidden="true" />
+                        <span>{formatChatAttachmentUploadStatus(attachmentUploadStatus)}</span>
+                      </div>
+                    )}
                     {attachments.length > 0 && (
                       <div className="composer-attachment-list">
                         {attachments.map(item => (
@@ -2458,6 +2493,7 @@ export default function Conversations() {
                   multiple
                   accept={CHAT_ATTACHMENT_ACCEPT}
                   onChange={e => void handleFilePicked(e.currentTarget.files)}
+                  disabled={isStreaming || isAttachmentUploading || isSessionDetailLoading}
                   style={{ display: 'none' }}
                 />
                 {messages.length > 0 && showScrollBottom && (
@@ -2523,9 +2559,9 @@ export default function Conversations() {
                       type="button"
                       className="composer-icon-btn"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={isStreaming || isSessionDetailLoading}
-                      title="上传文件"
-                      aria-label="上传文件"
+                      disabled={isStreaming || isAttachmentUploading || isSessionDetailLoading}
+                      title={isAttachmentUploading ? '附件上传中' : '上传文件'}
+                      aria-label={isAttachmentUploading ? '附件上传中' : '上传文件'}
                     >
                       +
                     </button>
@@ -2557,7 +2593,7 @@ export default function Conversations() {
                         type="button"
                         className="composer-send-btn"
                         onClick={handleSend}
-                        disabled={isSessionDetailLoading || (!input.trim() && attachments.length === 0)}
+                        disabled={isAttachmentUploading || isSessionDetailLoading || (!input.trim() && attachments.length === 0)}
                         title="发送"
                         aria-label="发送"
                       >
