@@ -20,6 +20,8 @@ import {
   createTenantUser,
   createTeam,
   createVisual,
+  archivePublicSkill,
+  deletePublicSkill,
   deleteDatasource,
   deleteUser,
   deleteChatSession,
@@ -60,6 +62,7 @@ import {
   createPublicSkill,
   registerUser,
   removeTeamMember,
+  restorePublicSkill,
   recordLearnedSkill,
   listLearnedSkills,
   replaceHookRules,
@@ -1316,8 +1319,14 @@ function toPublicSkillResponse(skill: ReturnType<typeof getPublicSkill> extends 
     authorTenantId: skill.authorTenantId,
     revision: skill.revision,
     publishedAt: skill.publishedAt,
+    archivedAt: skill.archivedAt,
+    deletedAt: skill.deletedAt,
     updatedAt: skill.updatedAt,
   };
+}
+
+function canManagePublicSkillLifecycle(auth: { tenantId: string; sub: string; role?: Role | null }, skill: ReturnType<typeof getPublicSkill> extends infer T ? NonNullable<T> : never) {
+  return skill.authorTenantId === auth.tenantId && (auth.role === 'tenant_admin' || skill.authorSub === auth.sub);
 }
 
 function resolveUserBackpackSkillPath(auth: { tenantId: string; sub: string }, input: { path?: unknown; name?: unknown }) {
@@ -1382,7 +1391,7 @@ function publishPublicSkillFromBackpack(auth: { tenantId: string; sub: string },
   const displayName = String(body.displayName || body.name || skill.name).trim().slice(0, 100) || skill.name;
   const description = String(body.description || skill.description).trim().slice(0, 500) || skill.description;
   const slug = normalizePublicSkillSlug(String(body.slug || displayName));
-  if (getPublicSkill(slug)) throw makeHttpError(`公共技能 slug "${slug}" 已存在`, 409);
+  if (getPublicSkill(slug, { includeArchived: true })) throw makeHttpError(`公共技能 slug "${slug}" 已存在`, 409);
 
   const id = crypto.randomUUID();
   const revision = 1;
@@ -1406,7 +1415,7 @@ function updatePublicSkillFromBackpack(
   idOrSlug: string,
   body: Record<string, unknown>,
 ) {
-  const current = getPublicSkill(idOrSlug);
+  const current = getPublicSkill(idOrSlug, { includeArchived: true });
   if (!current) throw makeHttpError('公共技能不存在', 404);
   if (current.authorTenantId !== auth.tenantId) throw makeHttpError('只能更新本租户发布的公共技能', 403);
 
@@ -1426,7 +1435,7 @@ function updatePublicSkillFromBackpack(
 
   const slug = body.slug === undefined ? current.slug : normalizePublicSkillSlug(String(body.slug));
   if (slug !== current.slug) {
-    const conflict = getPublicSkill(slug);
+    const conflict = getPublicSkill(slug, { includeArchived: true });
     if (conflict && conflict.id !== current.id) throw makeHttpError(`公共技能 slug "${slug}" 已存在`, 409);
   }
   const publicSkill = updatePublicSkill(current.id, {
@@ -3949,8 +3958,23 @@ app.post('/api/knowledge/sources/:id/file-preview', authMiddleware, (req: any, r
 });
 
 // ═══ Skills Routes ═══
-app.get('/api/skills/public', authMiddleware, (_req: any, res) => {
+app.get('/api/skills/public', authMiddleware, (req: any, res) => {
   try {
+    const includeArchived = String(req.query?.includeArchived || '') === '1';
+    if (includeArchived && req.auth.role === 'tenant_admin') {
+      res.json(listPublicSkills({ includeArchived: true }).map(toPublicSkillResponse));
+      return;
+    }
+    if (includeArchived) {
+      const activeSkills = listPublicSkills();
+      const ownArchivedSkills = listPublicSkills({ includeArchived: true })
+        .filter((skill) => skill.archivedAt
+          && skill.authorTenantId === req.auth.tenantId
+          && skill.authorSub === req.auth.sub);
+      const merged = Array.from(new Map([...activeSkills, ...ownArchivedSkills].map((skill) => [skill.id, skill])).values());
+      res.json(merged.map(toPublicSkillResponse));
+      return;
+    }
     res.json(listPublicSkills().map(toPublicSkillResponse));
   } catch (error) {
     const err = error as Error & { status?: number };
@@ -4019,6 +4043,81 @@ app.patch('/api/skills/public/:id', authMiddleware, requireAdmin, (req: any, res
   } catch (error) {
     const err = error as Error & { status?: number };
     res.status(err.status || 500).json({ error: err.message || '更新公共技能失败' });
+  }
+});
+
+app.post('/api/skills/public/:id/archive', authMiddleware, (req: any, res) => {
+  try {
+    const current = getPublicSkill(String(req.params.id || ''), { includeArchived: true });
+    if (!current) {
+      res.status(404).json({ error: '公共技能不存在' });
+      return;
+    }
+    if (!canManagePublicSkillLifecycle(req.auth, current)) {
+      res.status(403).json({ error: '只有管理员或发布人可以下线公共技能' });
+      return;
+    }
+    const publicSkill = archivePublicSkill(current.id);
+    audit(req.auth.tenantId, 'archive_public_skill', req.auth.sub, 'skill', `public-skill:${current.id}`, {
+      name: current.name,
+      slug: current.slug,
+    });
+    res.json(toPublicSkillResponse(publicSkill!));
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '下线公共技能失败' });
+  }
+});
+
+app.post('/api/skills/public/:id/restore', authMiddleware, (req: any, res) => {
+  try {
+    const current = getPublicSkill(String(req.params.id || ''), { includeArchived: true });
+    if (!current) {
+      res.status(404).json({ error: '公共技能不存在' });
+      return;
+    }
+    if (!canManagePublicSkillLifecycle(req.auth, current)) {
+      res.status(403).json({ error: '只有管理员或发布人可以恢复公共技能' });
+      return;
+    }
+    const publicSkill = restorePublicSkill(current.id);
+    audit(req.auth.tenantId, 'restore_public_skill', req.auth.sub, 'skill', `public-skill:${current.id}`, {
+      name: current.name,
+      slug: current.slug,
+    });
+    res.json(toPublicSkillResponse(publicSkill!));
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '恢复公共技能失败' });
+  }
+});
+
+app.delete('/api/skills/public/:id', authMiddleware, (req: any, res) => {
+  try {
+    const current = getPublicSkill(String(req.params.id || ''), { includeArchived: true });
+    if (!current) {
+      res.status(404).json({ error: '公共技能不存在' });
+      return;
+    }
+    if (!canManagePublicSkillLifecycle(req.auth, current)) {
+      res.status(403).json({ error: '只有管理员或发布人可以删除公共技能' });
+      return;
+    }
+    const deleted = deletePublicSkill(current.id);
+    const bundleRoot = path.dirname(deleted!.bundlePath);
+    const publicRoot = path.resolve(PUBLIC_SKILLS_DIR);
+    const resolvedBundleRoot = path.resolve(bundleRoot);
+    if (resolvedBundleRoot !== publicRoot && isPathInside(resolvedBundleRoot, publicRoot)) {
+      fs.rmSync(resolvedBundleRoot, { recursive: true, force: true });
+    }
+    audit(req.auth.tenantId, 'delete_public_skill', req.auth.sub, 'skill', `public-skill:${current.id}`, {
+      name: current.name,
+      slug: current.slug,
+    });
+    res.json({ ok: true, id: current.id });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 500).json({ error: err.message || '删除公共技能失败' });
   }
 });
 

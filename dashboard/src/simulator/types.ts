@@ -473,6 +473,8 @@ export interface PublicSkillInfo {
   authorTenantId: string;
   revision: number;
   publishedAt: number;
+  archivedAt?: number | null;
+  deletedAt?: number | null;
   updatedAt: number;
 }
 

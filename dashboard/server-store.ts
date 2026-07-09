@@ -325,6 +325,8 @@ export type PublicSkillRow = {
   revision: number;
   bundlePath: string;
   publishedAt: number;
+  archivedAt: number | null;
+  deletedAt: number | null;
   updatedAt: number;
 };
 
@@ -701,6 +703,8 @@ function initSchema() {
       revision INTEGER NOT NULL,
       bundle_path TEXT NOT NULL,
       published_at INTEGER NOT NULL,
+      archived_at INTEGER,
+      deleted_at INTEGER,
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_public_skills_updated_at ON public_skills (updated_at DESC);
@@ -769,6 +773,8 @@ function initSchema() {
   ensureColumn('chat_messages', 'run_id', 'TEXT');
   ensureColumn('chat_messages', 'run_stats_json', 'TEXT');
   ensureColumn('provider_profiles', 'model_context_windows_json', 'TEXT');
+  ensureColumn('public_skills', 'archived_at', 'INTEGER');
+  ensureColumn('public_skills', 'deleted_at', 'INTEGER');
   ensureColumn('quotas', 'knowledge_upload_admin_max_files', 'INTEGER NOT NULL DEFAULT 100');
   ensureColumn('quotas', 'knowledge_upload_member_max_files', 'INTEGER NOT NULL DEFAULT 20');
   ensureColumn('quotas', 'knowledge_upload_max_file_bytes', 'INTEGER NOT NULL DEFAULT 1048576');
@@ -1349,6 +1355,8 @@ function mapPublicSkill(row: any): PublicSkillRow {
     revision: Number(row.revision || 0),
     bundlePath: row.bundle_path,
     publishedAt: row.published_at,
+    archivedAt: row.archived_at ?? null,
+    deletedAt: row.deleted_at ?? null,
     updatedAt: row.updated_at,
   };
 }
@@ -2444,22 +2452,30 @@ export function scanKnowledgeSources(sourcePath?: string): { roots: string[]; ca
   return { roots, candidates: deduped };
 }
 
-export function listPublicSkills(): PublicSkillRow[] {
+export function listPublicSkills(options: { includeArchived?: boolean; includeDeleted?: boolean } = {}): PublicSkillRow[] {
+  const filters = [];
+  if (!options.includeArchived) filters.push('archived_at IS NULL');
+  if (!options.includeDeleted) filters.push('deleted_at IS NULL');
+  const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const rows = db.prepare(`
-    SELECT id, slug, name, description, author_sub, author_tenant_id, revision, bundle_path, published_at, updated_at
+    SELECT id, slug, name, description, author_sub, author_tenant_id, revision, bundle_path, published_at, archived_at, deleted_at, updated_at
     FROM public_skills
+    ${whereClause}
     ORDER BY updated_at DESC, name ASC
   `).all();
   return rows.map(mapPublicSkill);
 }
 
-export function getPublicSkill(idOrSlug: string): PublicSkillRow | null {
+export function getPublicSkill(idOrSlug: string, options: { includeArchived?: boolean; includeDeleted?: boolean } = {}): PublicSkillRow | null {
   const key = String(idOrSlug || '').trim();
   if (!key) return null;
+  const filters = ['(id = ? OR slug = ?)'];
+  if (!options.includeArchived) filters.push('archived_at IS NULL');
+  if (!options.includeDeleted) filters.push('deleted_at IS NULL');
   const row = db.prepare(`
-    SELECT id, slug, name, description, author_sub, author_tenant_id, revision, bundle_path, published_at, updated_at
+    SELECT id, slug, name, description, author_sub, author_tenant_id, revision, bundle_path, published_at, archived_at, deleted_at, updated_at
     FROM public_skills
-    WHERE id = ? OR slug = ?
+    WHERE ${filters.join(' AND ')}
     LIMIT 1
   `).get(key, key);
   return row ? mapPublicSkill(row) : null;
@@ -2508,7 +2524,7 @@ export function updatePublicSkill(id: string, patch: {
   revision?: number;
   bundlePath?: string;
 }): PublicSkillRow | null {
-  const current = getPublicSkill(id);
+  const current = getPublicSkill(id, { includeArchived: true });
   if (!current) return null;
   const updatedAt = now();
   db.prepare(`
@@ -2529,7 +2545,42 @@ export function updatePublicSkill(id: string, patch: {
     updatedAt,
     current.id,
   );
+  return getPublicSkill(current.id, { includeArchived: true });
+}
+
+export function archivePublicSkill(idOrSlug: string): PublicSkillRow | null {
+  const current = getPublicSkill(idOrSlug, { includeArchived: true });
+  if (!current) return null;
+  if (current.archivedAt) return current;
+  const archivedAt = now();
+  db.prepare(`
+    UPDATE public_skills
+    SET archived_at = ?,
+        updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(archivedAt, archivedAt, current.id);
+  return getPublicSkill(current.id, { includeArchived: true });
+}
+
+export function restorePublicSkill(idOrSlug: string): PublicSkillRow | null {
+  const current = getPublicSkill(idOrSlug, { includeArchived: true });
+  if (!current) return null;
+  if (!current.archivedAt) return current;
+  const updatedAt = now();
+  db.prepare(`
+    UPDATE public_skills
+    SET archived_at = NULL,
+        updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL
+  `).run(updatedAt, current.id);
   return getPublicSkill(current.id);
+}
+
+export function deletePublicSkill(idOrSlug: string): PublicSkillRow | null {
+  const current = getPublicSkill(idOrSlug, { includeArchived: true });
+  if (!current) return null;
+  db.prepare('DELETE FROM public_skills WHERE id = ?').run(current.id);
+  return current;
 }
 
 export function recordLearnedSkill(input: {

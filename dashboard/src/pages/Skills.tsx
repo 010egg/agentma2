@@ -26,6 +26,8 @@ function toPublicSkillInfo(data: Record<string, unknown>): PublicSkillInfo {
     authorTenantId: String(data.authorTenantId || ''),
     revision: Number(data.revision || 0),
     publishedAt: Number(data.publishedAt || 0),
+    archivedAt: Number(data.archivedAt || 0) || null,
+    deletedAt: Number(data.deletedAt || 0) || null,
     updatedAt: Number(data.updatedAt || 0),
   };
 }
@@ -123,6 +125,7 @@ export default function Skills() {
   const [publicLoading, setPublicLoading] = useState(false);
   const [learningId, setLearningId] = useState('');
   const [publishingName, setPublishingName] = useState('');
+  const [publicActionId, setPublicActionId] = useState('');
   const [learnConflict, setLearnConflict] = useState<{ skill: PublicSkillInfo; message: string } | null>(null);
   const [learnNameOverride, setLearnNameOverride] = useState('');
   const workspaceConversationLabel = parseConversationIdInput(workspaceConversationId) || workspaceConversationId.trim();
@@ -221,7 +224,8 @@ export default function Skills() {
   const loadPublicSkills = async () => {
     setPublicLoading(true);
     try {
-      const res = await fetch('/api/skills/public', { headers: getAuthHeaders() });
+      const query = user?.role === 'tenant_admin' || user?.id ? '?includeArchived=1' : '';
+      const res = await fetch(`/api/skills/public${query}`, { headers: getAuthHeaders() });
       const data = await res.json().catch(() => []);
       if (!res.ok) {
         setActionMsg({ type: 'error', text: data.error || `读取公共技能失败: HTTP ${res.status}` });
@@ -558,6 +562,42 @@ export default function Skills() {
 
   const learnedCount = skills.filter(s => s.learnedFromPublicSkillId).length;
   const canPublish = user?.role === 'tenant_admin';
+  const isMyPublicSkill = (skill: PublicSkillInfo) => Boolean(user?.id && skill.authorSub === user.id)
+    || Boolean(user?.email && skill.authorSub === user.email);
+  const canSeeArchivedPublicSkills = canPublish || publicSkills.some(isMyPublicSkill);
+  const onlinePublicCount = publicSkills.filter(skill => !skill.archivedAt && !skill.deletedAt).length;
+  const archivedPublicCount = publicSkills.filter(skill => skill.archivedAt && !skill.deletedAt).length;
+  const managePublicSkill = async (skill: PublicSkillInfo, action: 'archive' | 'restore' | 'delete') => {
+    const actionLabel = action === 'archive' ? '下线' : action === 'restore' ? '恢复上线' : '删除';
+    const confirmText = action === 'archive'
+      ? `下线公共技能 "${skill.name}"？下线后新用户不能再学习，已学习到背包的副本不受影响。`
+      : action === 'restore'
+        ? `恢复上线公共技能 "${skill.name}"？恢复后用户可以再次学习。`
+        : `删除公共技能 "${skill.name}"？将从公共目录移除并清理公共技能包，已学习到背包的副本不受影响。`;
+    if (!window.confirm(confirmText)) return;
+    setPublicActionId(`${action}:${skill.id}`);
+    setActionMsg(null);
+    try {
+      const url = action === 'delete'
+        ? `/api/skills/public/${encodeURIComponent(skill.id)}`
+        : `/api/skills/public/${encodeURIComponent(skill.id)}/${action}`;
+      const res = await fetch(url, {
+        method: action === 'delete' ? 'DELETE' : 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setActionMsg({ type: 'error', text: data.error || `${actionLabel}失败: HTTP ${res.status}` });
+        return;
+      }
+      await loadPublicSkills();
+      setActionMsg({ type: 'success', text: `已${actionLabel}公共技能 "${skill.name}"。` });
+    } catch (e) {
+      setActionMsg({ type: 'error', text: `${actionLabel}失败: ${(e as Error).message}` });
+    } finally {
+      setPublicActionId('');
+    }
+  };
 
   return (
     <div>
@@ -598,8 +638,8 @@ export default function Skills() {
           <div className="grid-3 mb-4">
             <div className="kpi-card">
               <div className="kpi-label">公共技能</div>
-              <div className="kpi-value">{publicSkills.length}</div>
-              <div className="kpi-sub">可学习模板</div>
+              <div className="kpi-value">{onlinePublicCount}</div>
+              <div className="kpi-sub">{canSeeArchivedPublicSkills ? `在线模板，${archivedPublicCount} 个已下线` : '可学习模板'}</div>
             </div>
             <div className="kpi-card">
               <div className="kpi-label">已学习</div>
@@ -657,6 +697,9 @@ export default function Skills() {
             <div className="grid-2">
               {publicSkills.map(skill => {
                 const alreadyLearned = skills.some(item => item.learnedFromPublicSkillId === skill.id);
+                const archived = Boolean(skill.archivedAt);
+                const canManagePublicSkill = skill.authorTenantId === user?.tenantId && (canPublish || isMyPublicSkill(skill));
+                const busyPublicAction = publicActionId.endsWith(`:${skill.id}`);
                 return (
                   <div key={skill.id} className="tool-card">
                     <div className="flex-between" style={{ alignItems: 'flex-start', gap: 12 }}>
@@ -667,6 +710,7 @@ export default function Skills() {
                           <span className="badge badge-muted">{skill.slug}</span>
                           <span className="badge badge-info">rev {skill.revision}</span>
                           <span className="badge badge-muted">{shortDate(skill.updatedAt)}</span>
+                          {archived && <span className="badge badge-warning">已下线</span>}
                         </div>
                         <div className="mt-1" style={{ fontSize: '.72em', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>
                           {skill.authorSub}
@@ -677,10 +721,38 @@ export default function Skills() {
                         <button
                           className="btn btn-primary btn-sm"
                           onClick={() => { void learnPublicSkill(skill); }}
-                          disabled={learningId === skill.id}
+                          disabled={learningId === skill.id || archived}
                         >
-                          {learningId === skill.id ? '学习中...' : '学习技能'}
+                          {learningId === skill.id ? '学习中...' : archived ? '已下线' : '学习技能'}
                         </button>
+                        {canManagePublicSkill && (
+                          <div className="flex gap-2" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                            {archived ? (
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => { void managePublicSkill(skill, 'restore'); }}
+                                disabled={busyPublicAction}
+                              >
+                                恢复
+                              </button>
+                            ) : (
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => { void managePublicSkill(skill, 'archive'); }}
+                                disabled={busyPublicAction}
+                              >
+                                下线
+                              </button>
+                            )}
+                            <button
+                              className="btn btn-sm btn-danger"
+                              onClick={() => { void managePublicSkill(skill, 'delete'); }}
+                              disabled={busyPublicAction}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

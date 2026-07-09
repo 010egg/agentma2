@@ -174,7 +174,6 @@ async function main() {
   const sourceSkillDir = path.join(userSkillsDir, 'smoke-public-source');
   const externalSkillDir = path.join(externalSkillRoot, 'smoke-external-source');
   const learnedName = 'smoke-public-learned';
-  const learnedSkillDir = path.join(userSkillsDir, learnedName);
   let managedServer = null;
 
   try {
@@ -196,6 +195,24 @@ async function main() {
     }));
     const token = register.token;
     const authHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const memberEmail = `agentma-skills-member-${stamp}@example.test`;
+    const member = await requireOk('create member', fetchJson(`${baseUrl}/api/users`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        name: 'Skills Public Member',
+        email: memberEmail,
+        password: 'test-password-123',
+        role: 'member',
+      }),
+    }));
+    const memberLogin = await requireOk('member login', fetchJson(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: member.email, password: 'test-password-123' }),
+    }));
+    const memberHeaders = { Authorization: `Bearer ${memberLogin.token}`, 'Content-Type': 'application/json' };
 
     const published = await requireOk('publish public skill', fetchJson(`${baseUrl}/api/skills/public`, {
       method: 'POST',
@@ -221,18 +238,18 @@ async function main() {
       headers: { Authorization: `Bearer ${token}` },
     }));
 
-    const duplicate = await fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/learn`, {
-      method: 'POST',
-      headers: authHeaders,
-      body: JSON.stringify({}),
-    });
-
     const learned = await requireOk('learn public skill with override', fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/learn`, {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({ nameOverride: learnedName }),
     }));
+    const learnedSkillDir = learned.installedPath || path.join(userSkillsDir, learned.name);
     const learnedBeforeUpdate = fs.readFileSync(path.join(learnedSkillDir, 'SKILL.md'), 'utf8');
+    const duplicate = await fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/learn`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ nameOverride: learnedName }),
+    });
 
     writeSkill(sourceSkillDir, 'UPDATED', 'Updated public skill smoke test');
     const updated = await requireOk('update public skill', fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}`, {
@@ -247,6 +264,50 @@ async function main() {
       headers: { Authorization: `Bearer ${token}` },
     }));
     const learnedAfterUpdate = fs.readFileSync(path.join(learnedSkillDir, 'SKILL.md'), 'utf8');
+
+    const authorDemoted = await requireOk('demote author to member', fetchJson(`${baseUrl}/api/users/${encodeURIComponent(register.email)}`, {
+      method: 'PATCH',
+      headers: authHeaders,
+      body: JSON.stringify({ role: 'member' }),
+    }));
+
+    const memberArchive = await fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/archive`, {
+      method: 'POST',
+      headers: memberHeaders,
+    });
+    const memberDelete = await fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}`, {
+      method: 'DELETE',
+      headers: memberHeaders,
+    });
+    const archived = await requireOk('archive public skill', fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/archive`, {
+      method: 'POST',
+      headers: authHeaders,
+    }));
+    const listAfterArchive = await requireOk('list public skills after archive', fetchJson(`${baseUrl}/api/skills/public`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const authorListAfterArchive = await requireOk('author list archived public skills', fetchJson(`${baseUrl}/api/skills/public?includeArchived=1`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const learnArchived = await fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/learn`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ nameOverride: 'smoke-public-archived-learn' }),
+    });
+    const restored = await requireOk('restore public skill', fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}/restore`, {
+      method: 'POST',
+      headers: authHeaders,
+    }));
+    const listAfterRestore = await requireOk('list public skills after restore', fetchJson(`${baseUrl}/api/skills/public`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }));
+    const deleted = await requireOk('delete public skill', fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}`, {
+      method: 'DELETE',
+      headers: authHeaders,
+    }));
+    const detailAfterDelete = await fetchJson(`${baseUrl}/api/skills/public/${encodeURIComponent(published.id)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     const audit = await requireOk('audit logs', fetchJson(`${baseUrl}/api/audit-logs`, {
       headers: { Authorization: `Bearer ${token}` },
     }));
@@ -260,7 +321,17 @@ async function main() {
       learnedHasSourceMetadata: learned.learnedFromPublicSkillId === published.id && learned.learnedFromPublicRevision === 1,
       updatedRevisionTwo: updated.revision === 2 && detail.revision === 2,
       learnedCopyStayedOriginal: learnedBeforeUpdate.includes('ORIGINAL') && learnedAfterUpdate.includes('ORIGINAL') && !learnedAfterUpdate.includes('UPDATED'),
-      auditRecorded: Array.isArray(audit) && ['publish_public_skill', 'learn_public_skill', 'update_public_skill'].every((action) => (
+      authorDemotedToMember: authorDemoted.role === 'member',
+      memberCannotArchive: memberArchive.response.status === 403,
+      memberCannotDelete: memberDelete.response.status === 403,
+      archivedHasTimestamp: Number(archived.archivedAt) > 0,
+      archivedHiddenFromDefaultList: Array.isArray(listAfterArchive) && !listAfterArchive.some((skill) => skill?.id === published.id),
+      archivedVisibleToAuthorList: Array.isArray(authorListAfterArchive) && authorListAfterArchive.some((skill) => skill?.id === published.id && Number(skill.archivedAt) > 0),
+      archivedCannotBeLearned: learnArchived.response.status === 404,
+      restoredVisibleInDefaultList: !restored.archivedAt && Array.isArray(listAfterRestore) && listAfterRestore.some((skill) => skill?.id === published.id),
+      deletedRemovedPublicSkill: deleted.ok === true && detailAfterDelete.response.status === 404,
+      learnedCopySurvivesPublicDelete: fs.existsSync(path.join(learnedSkillDir, 'SKILL.md')),
+      auditRecorded: Array.isArray(audit) && ['publish_public_skill', 'learn_public_skill', 'update_public_skill', 'archive_public_skill', 'restore_public_skill', 'delete_public_skill'].every((action) => (
         audit.some((row) => row?.action === action)
       )),
     };
@@ -268,6 +339,8 @@ async function main() {
     console.log(`published ${JSON.stringify(published)}`);
     console.log(`learned ${JSON.stringify(learned)}`);
     console.log(`updated ${JSON.stringify(updated)}`);
+    console.log(`archived ${JSON.stringify(archived)}`);
+    console.log(`restored ${JSON.stringify(restored)}`);
     console.log(`checks ${JSON.stringify(checks)}`);
 
     const failed = Object.entries(checks).filter(([, value]) => !value).map(([key]) => key);
