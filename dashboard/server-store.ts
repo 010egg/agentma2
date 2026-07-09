@@ -15,6 +15,7 @@ import {
 } from './src/simulator/run-state.ts';
 
 export type Role = 'tenant_admin' | 'team_admin' | 'member';
+export type UserPlanTier = 'free' | 'plus' | 'pro' | 'max';
 
 export type AuthIdentity = {
   sub: string;
@@ -33,9 +34,60 @@ export type UserRow = {
   name: string;
   tenantId: string;
   role: Role;
+  planTier: UserPlanTier;
+  dailyConversationLimit: number | null;
+  fiveHourTokenLimit: number | null;
+  weeklyTokenLimit: number | null;
   inputSuggestionModel: string;
   createdAt: number;
 };
+
+export type UserQuotaLimits = {
+  dailyConversationLimit: number | null;
+  fiveHourTokenLimit: number | null;
+  weeklyTokenLimit: number | null;
+};
+
+export type UserQuotaWindowUsage = {
+  used: number;
+  limit: number | null;
+  percent: number;
+  resetsAt: number;
+};
+
+export type UserQuotaUsageSummary = {
+  dailyConversations: UserQuotaWindowUsage;
+  fiveHourTokens: UserQuotaWindowUsage;
+  weeklyTokens: UserQuotaWindowUsage;
+};
+
+export type UserPlanQuotaSummary = {
+  planTier: UserPlanTier;
+  defaults: UserQuotaLimits;
+  overrides: UserQuotaLimits;
+  effective: UserQuotaLimits;
+};
+
+export type UserRowWithQuota = UserRow & {
+  quota: UserPlanQuotaSummary;
+  usage: UserQuotaUsageSummary;
+};
+
+export type UserQuotaCheckResult =
+  | { ok: true; userId: string; quota: UserPlanQuotaSummary; usage: UserQuotaUsageSummary }
+  | {
+    ok: false;
+    status: number;
+    error: 'quota_exceeded' | 'user_not_found';
+    message: string;
+    quota?: {
+      planTier: UserPlanTier;
+      window: 'daily' | 'five_hour' | 'weekly';
+      used: number;
+      limit: number;
+      resetsAt: number;
+    };
+  };
 
 export type TenantRow = {
   id: string;
@@ -181,6 +233,11 @@ export type ChatRunStats = {
   durationMs?: number;
   inTok?: number;
   outTok?: number;
+};
+
+export type AgentTemplatePopularity = {
+  runCount: number;
+  lastRunAt: number | null;
 };
 
 export type ChatHistoryMessage = {
@@ -370,6 +427,33 @@ const DEFAULT_QUOTA = {
   knowledgeUploadMaxFileBytes: 1024 * 1024,
 };
 
+const SYSTEM_ACCOUNT_ADMIN_EMAIL = 'admin@agentma.com';
+const USER_PLAN_DEFAULTS: Record<UserPlanTier, UserQuotaLimits> = {
+  free: {
+    dailyConversationLimit: 5,
+    fiveHourTokenLimit: null,
+    weeklyTokenLimit: null,
+  },
+  plus: {
+    dailyConversationLimit: null,
+    fiveHourTokenLimit: 1_000_000,
+    weeklyTokenLimit: 5_000_000,
+  },
+  pro: {
+    dailyConversationLimit: null,
+    fiveHourTokenLimit: 5_000_000,
+    weeklyTokenLimit: 25_000_000,
+  },
+  max: {
+    dailyConversationLimit: null,
+    fiveHourTokenLimit: 20_000_000,
+    weeklyTokenLimit: 100_000_000,
+  },
+};
+const DAY_MS = 24 * 60 * 60 * 1000;
+const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+const WEEK_MS = 7 * DAY_MS;
+
 const DATA_DIR = process.env.AGENTMA_DATA_DIR
   || path.join(os.homedir(), 'Library', 'Application Support', 'agentma2');
 const DB_PATH = path.join(DATA_DIR, 'dashboard.sqlite');
@@ -403,6 +487,10 @@ function baseUsernameFromEmail(email: string) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 40);
   return normalized || 'user';
+}
+
+function normalizeEmail(email: string) {
+  return String(email || '').trim().toLowerCase();
 }
 
 function uniqueUsernameForEmail(email: string, existing: Set<string>) {
@@ -498,6 +586,10 @@ function initSchema() {
       password_hash TEXT NOT NULL,
       tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
+      plan_tier TEXT NOT NULL DEFAULT 'free',
+      daily_conversation_limit INTEGER,
+      five_hour_token_limit INTEGER,
+      weekly_token_limit INTEGER,
       input_suggestion_model TEXT,
       created_at INTEGER NOT NULL
     );
@@ -562,6 +654,19 @@ function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_id_created_at ON audit_logs (tenant_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_action_created_at ON audit_logs (tenant_id, action, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS user_usage_events (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      tokens INTEGER NOT NULL DEFAULT 0,
+      model TEXT,
+      run_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_usage_events_user_window ON user_usage_events (tenant_id, user_id, event_type, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_user_usage_events_tenant_created_at ON user_usage_events (tenant_id, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS chat_sessions (
       id TEXT PRIMARY KEY,
       tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -600,6 +705,15 @@ function initSchema() {
       PRIMARY KEY (session_id, seq)
     );
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session_seq ON chat_messages (session_id, seq);
+
+    CREATE TABLE IF NOT EXISTS agent_template_usage (
+      tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      template_id TEXT NOT NULL,
+      run_count INTEGER NOT NULL DEFAULT 0,
+      last_run_at INTEGER,
+      PRIMARY KEY (tenant_id, template_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_template_usage_tenant_popularity ON agent_template_usage (tenant_id, run_count DESC, last_run_at DESC);
 
     CREATE TABLE IF NOT EXISTS chat_suggestions (
       id TEXT PRIMARY KEY,
@@ -752,6 +866,10 @@ function initSchema() {
   `);
   ensureColumn('users', 'id', 'TEXT');
   ensureColumn('users', 'username', 'TEXT');
+  ensureColumn('users', 'plan_tier', "TEXT NOT NULL DEFAULT 'free'");
+  ensureColumn('users', 'daily_conversation_limit', 'INTEGER');
+  ensureColumn('users', 'five_hour_token_limit', 'INTEGER');
+  ensureColumn('users', 'weekly_token_limit', 'INTEGER');
   ensureColumn('users', 'input_suggestion_model', 'TEXT');
   backfillUserIdentityColumns();
   migrateOwnerSubsToUserIds();
@@ -772,6 +890,19 @@ function initSchema() {
   ensureColumn('chat_messages', 'outcome_detail', 'TEXT');
   ensureColumn('chat_messages', 'run_id', 'TEXT');
   ensureColumn('chat_messages', 'run_stats_json', 'TEXT');
+  db.exec(`
+    INSERT INTO agent_template_usage (tenant_id, template_id, run_count, last_run_at)
+    SELECT s.tenant_id, s.template_id, COUNT(m.run_id), MAX(m.timestamp)
+    FROM chat_sessions s
+    JOIN chat_messages m ON m.session_id = s.id
+    WHERE s.template_id IS NOT NULL
+      AND s.template_id != ''
+      AND m.role = 'assistant'
+      AND m.run_id IS NOT NULL
+      AND m.run_id != ''
+    GROUP BY s.tenant_id, s.template_id
+    ON CONFLICT(tenant_id, template_id) DO NOTHING;
+  `);
   ensureColumn('provider_profiles', 'model_context_windows_json', 'TEXT');
   ensureColumn('public_skills', 'archived_at', 'INTEGER');
   ensureColumn('public_skills', 'deleted_at', 'INTEGER');
@@ -1194,6 +1325,67 @@ function parseJsonArray(value: string | null) {
   }
 }
 
+function normalizeUserPlanTier(value: unknown, fallback: UserPlanTier = 'free'): UserPlanTier {
+  const tier = String(value || '').trim().toLowerCase();
+  return ['free', 'plus', 'pro', 'max'].includes(tier) ? tier as UserPlanTier : fallback;
+}
+
+function nullablePositiveInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function quotaOverrideFromRow(value: unknown) {
+  return nullablePositiveInt(value);
+}
+
+function quotaPatchValue(value: unknown, current: number | null): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, value: current };
+  if (value === null || value === '') return { ok: true, value: null };
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0) return { ok: false, error: 'quota overrides must be non-negative numbers or null' };
+  return { ok: true, value: n };
+}
+
+function userPlanDefaults(planTier: UserPlanTier): UserQuotaLimits {
+  return { ...USER_PLAN_DEFAULTS[planTier] };
+}
+
+function effectiveUserQuota(user: Pick<UserRow, 'planTier' | 'dailyConversationLimit' | 'fiveHourTokenLimit' | 'weeklyTokenLimit'>): UserPlanQuotaSummary {
+  const planTier = normalizeUserPlanTier(user.planTier);
+  const defaults = userPlanDefaults(planTier);
+  const overrides = {
+    dailyConversationLimit: user.dailyConversationLimit,
+    fiveHourTokenLimit: user.fiveHourTokenLimit,
+    weeklyTokenLimit: user.weeklyTokenLimit,
+  };
+  return {
+    planTier,
+    defaults,
+    overrides,
+    effective: {
+      dailyConversationLimit: overrides.dailyConversationLimit ?? defaults.dailyConversationLimit,
+      fiveHourTokenLimit: overrides.fiveHourTokenLimit ?? defaults.fiveHourTokenLimit,
+      weeklyTokenLimit: overrides.weeklyTokenLimit ?? defaults.weeklyTokenLimit,
+    },
+  };
+}
+
+function startOfLocalDay(timestamp: number) {
+  const date = new Date(timestamp);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function endOfLocalDay(timestamp: number) {
+  return startOfLocalDay(timestamp) + DAY_MS;
+}
+
+function windowPercent(used: number, limit: number | null) {
+  return limit === null ? 0 : clampPercent(used, limit);
+}
+
 function mapTenant(row: any): TenantRow {
   return {
     id: row.id,
@@ -1206,6 +1398,7 @@ function mapTenant(row: any): TenantRow {
 }
 
 function mapUser(row: any): UserRow {
+  const planTier = normalizeUserPlanTier(row.plan_tier);
   return {
     id: row.id,
     username: row.username,
@@ -1213,6 +1406,10 @@ function mapUser(row: any): UserRow {
     name: row.name,
     tenantId: row.tenant_id,
     role: row.role,
+    planTier,
+    dailyConversationLimit: quotaOverrideFromRow(row.daily_conversation_limit),
+    fiveHourTokenLimit: quotaOverrideFromRow(row.five_hour_token_limit),
+    weeklyTokenLimit: quotaOverrideFromRow(row.weekly_token_limit),
     inputSuggestionModel: row.input_suggestion_model || '',
     createdAt: row.created_at,
   };
@@ -1496,11 +1693,14 @@ function mapChatSessionSummary(row: any, viewerSub?: string): ChatHistorySession
 }
 
 function getUserWithPassword(email: string) {
+  const normalizedEmail = normalizeEmail(email);
   return db.prepare(`
-    SELECT id, username, email, name, password_hash, tenant_id, role, input_suggestion_model, created_at
+    SELECT id, username, email, name, password_hash, tenant_id, role,
+           plan_tier, daily_conversation_limit, five_hour_token_limit, weekly_token_limit,
+           input_suggestion_model, created_at
     FROM users
     WHERE email = ?
-  `).get(email) as {
+  `).get(normalizedEmail) as {
     id: string;
     username: string;
     email: string;
@@ -1508,23 +1708,32 @@ function getUserWithPassword(email: string) {
     password_hash: string;
     tenant_id: string;
     role: Role;
+    plan_tier?: string | null;
+    daily_conversation_limit?: number | null;
+    five_hour_token_limit?: number | null;
+    weekly_token_limit?: number | null;
     input_suggestion_model?: string | null;
     created_at: number;
   } | undefined;
 }
 
 function getUser(email: string) {
+  const normalizedEmail = normalizeEmail(email);
   const row = db.prepare(`
-    SELECT id, username, email, name, tenant_id, role, input_suggestion_model, created_at
+    SELECT id, username, email, name, tenant_id, role,
+           plan_tier, daily_conversation_limit, five_hour_token_limit, weekly_token_limit,
+           input_suggestion_model, created_at
     FROM users
     WHERE email = ?
-  `).get(email);
+  `).get(normalizedEmail);
   return row ? mapUser(row) : null;
 }
 
 function getUserById(id: string) {
   const row = db.prepare(`
-    SELECT id, username, email, name, tenant_id, role, input_suggestion_model, created_at
+    SELECT id, username, email, name, tenant_id, role,
+           plan_tier, daily_conversation_limit, five_hour_token_limit, weekly_token_limit,
+           input_suggestion_model, created_at
     FROM users
     WHERE id = ?
   `).get(id);
@@ -1597,7 +1806,7 @@ export function authenticateToken(token: string | undefined | null): AuthIdentit
       sub: user.id,
       email: user.email,
       username: user.username,
-      tenantId: jwtPayload.tenantId,
+      tenantId: user.tenantId,
       role: user.role,
       authType: 'jwt',
     };
@@ -1630,23 +1839,78 @@ export function authenticateToken(token: string | undefined | null): AuthIdentit
 }
 
 export function registerUser(name: string, email: string, password: string) {
-  if (getUser(email)) return { ok: false as const, status: 409, error: '邮箱已注册' };
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedName = String(name || '').trim() || normalizedEmail.split('@')[0] || '成员';
+  if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    return { ok: false as const, status: 400, error: '邮箱格式无效' };
+  }
+  if (!password || password.length < 6) {
+    return { ok: false as const, status: 400, error: '密码至少 6 位' };
+  }
+  if (getUser(normalizedEmail)) return { ok: false as const, status: 409, error: '邮箱已注册' };
 
-  const tenantId = crypto.randomUUID();
+  const systemAdmin = getUser(SYSTEM_ACCOUNT_ADMIN_EMAIL);
+  const systemTenantId = systemAdmin?.tenantId || '';
   const createdAt = now();
   const passwordHash = bcrypt.hashSync(password, 10);
 
+  if (systemAdmin) {
+    if (!getTenant(systemTenantId)) {
+      return { ok: false as const, status: 500, error: '系统账户租户不存在' };
+    }
+    db.prepare(`
+      INSERT INTO users (
+        id, username, email, name, password_hash, tenant_id, role, plan_tier,
+        daily_conversation_limit, five_hour_token_limit, weekly_token_limit, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      uniqueUsernameForEmail(normalizedEmail, loadExistingUsernames()),
+      normalizedEmail,
+      normalizedName,
+      passwordHash,
+      systemTenantId,
+      'member',
+      'free',
+      null,
+      null,
+      null,
+      createdAt,
+    );
+    audit(systemTenantId, 'register', normalizedEmail, 'user', `tenant:${systemTenantId}`, { joinedSystemAccount: true });
+    const user = getUser(normalizedEmail)!;
+    return { ok: true as const, user, tenantId: systemTenantId };
+  }
+
+  const tenantId = crypto.randomUUID();
   db.exec('BEGIN');
   try {
     db.prepare(`
       INSERT INTO tenants (id, name, region, plan, status, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(tenantId, `${name || email}'s Workspace`, 'us', 'free', 'active', createdAt);
+    `).run(tenantId, `${normalizedName || normalizedEmail}'s Workspace`, 'us', 'free', 'active', createdAt);
 
     db.prepare(`
-      INSERT INTO users (id, username, email, name, password_hash, tenant_id, role, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(crypto.randomUUID(), uniqueUsernameForEmail(email, loadExistingUsernames()), email, name || email.split('@')[0], passwordHash, tenantId, 'tenant_admin', createdAt);
+      INSERT INTO users (
+        id, username, email, name, password_hash, tenant_id, role, plan_tier,
+        daily_conversation_limit, five_hour_token_limit, weekly_token_limit, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      uniqueUsernameForEmail(normalizedEmail, loadExistingUsernames()),
+      normalizedEmail,
+      normalizedName,
+      passwordHash,
+      tenantId,
+      'tenant_admin',
+      'free',
+      null,
+      null,
+      null,
+      createdAt,
+    );
 
     ensureQuotaForTenant(tenantId);
     db.exec('COMMIT');
@@ -1655,8 +1919,8 @@ export function registerUser(name: string, email: string, password: string) {
     throw error;
   }
 
-  audit(tenantId, 'register', email, 'user', `tenant:${tenantId}`);
-  const user = getUser(email)!;
+  audit(tenantId, 'register', normalizedEmail, 'user', `tenant:${tenantId}`, { setupFallback: true });
+  const user = getUser(normalizedEmail)!;
   return { ok: true as const, user, tenantId };
 }
 
@@ -1714,6 +1978,10 @@ export function loginUser(email: string, password: string) {
       name: user.name,
       tenantId: user.tenant_id,
       role: user.role,
+      planTier: normalizeUserPlanTier(user.plan_tier),
+      dailyConversationLimit: quotaOverrideFromRow(user.daily_conversation_limit),
+      fiveHourTokenLimit: quotaOverrideFromRow(user.five_hour_token_limit),
+      weeklyTokenLimit: quotaOverrideFromRow(user.weekly_token_limit),
       inputSuggestionModel: user.input_suggestion_model || '',
       createdAt: user.created_at,
     },
@@ -1730,6 +1998,10 @@ export function getMe(identity: AuthIdentity) {
     tenantId: identity.tenantId,
     name: user?.name,
     role: user?.role || identity.role || undefined,
+    planTier: user?.planTier,
+    dailyConversationLimit: user?.dailyConversationLimit ?? null,
+    fiveHourTokenLimit: user?.fiveHourTokenLimit ?? null,
+    weeklyTokenLimit: user?.weeklyTokenLimit ?? null,
     inputSuggestionModel: user?.inputSuggestionModel || '',
     plan: tenant?.plan,
     region: tenant?.region,
@@ -1765,7 +2037,9 @@ export function updateTenant(tenantId: string, patch: { name?: string; plan?: st
 
 export function listUsers(tenantId: string) {
   const rows = db.prepare(`
-    SELECT id, username, email, name, tenant_id, role, input_suggestion_model, created_at
+    SELECT id, username, email, name, tenant_id, role,
+           plan_tier, daily_conversation_limit, five_hour_token_limit, weekly_token_limit,
+           input_suggestion_model, created_at
     FROM users
     WHERE tenant_id = ?
     ORDER BY created_at ASC
@@ -1773,11 +2047,224 @@ export function listUsers(tenantId: string) {
   return rows.map(mapUser);
 }
 
+export function listUsersWithQuota(tenantId: string): UserRowWithQuota[] {
+  return listUsers(tenantId).map((user) => ({
+    ...user,
+    quota: effectiveUserQuota(user),
+    usage: getUserQuotaUsage(tenantId, user.id),
+  }));
+}
+
 export function updateUserRole(tenantId: string, email: string, role: Role) {
   const user = getUser(email);
   if (!user || user.tenantId !== tenantId) return null;
   db.prepare('UPDATE users SET role = ? WHERE email = ?').run(role, email);
   return getUser(email);
+}
+
+export function updateUserPlanQuota(tenantId: string, email: string, patch: Record<string, unknown>) {
+  const user = getUser(email);
+  if (!user || user.tenantId !== tenantId) return { ok: false as const, status: 404, error: 'not found' };
+  const planTier = patch.planTier === undefined
+    ? user.planTier
+    : normalizeUserPlanTier(patch.planTier, user.planTier);
+  if (patch.planTier !== undefined && String(patch.planTier || '').trim().toLowerCase() !== planTier) {
+    return { ok: false as const, status: 400, error: 'invalid plan tier' };
+  }
+  const daily = quotaPatchValue(patch.dailyConversationLimit, user.dailyConversationLimit);
+  if (!daily.ok) return { ok: false as const, status: 400, error: daily.error };
+  const fiveHour = quotaPatchValue(patch.fiveHourTokenLimit, user.fiveHourTokenLimit);
+  if (!fiveHour.ok) return { ok: false as const, status: 400, error: fiveHour.error };
+  const weekly = quotaPatchValue(patch.weeklyTokenLimit, user.weeklyTokenLimit);
+  if (!weekly.ok) return { ok: false as const, status: 400, error: weekly.error };
+
+  db.prepare(`
+    UPDATE users
+    SET plan_tier = ?,
+        daily_conversation_limit = ?,
+        five_hour_token_limit = ?,
+        weekly_token_limit = ?
+    WHERE tenant_id = ? AND email = ?
+  `).run(
+    planTier,
+    daily.value,
+    fiveHour.value,
+    weekly.value,
+    tenantId,
+    normalizeEmail(email),
+  );
+  const saved = getUser(email)!;
+  return {
+    ok: true as const,
+    user: {
+      ...saved,
+      quota: effectiveUserQuota(saved),
+      usage: getUserQuotaUsage(tenantId, saved.id),
+    } satisfies UserRowWithQuota,
+  };
+}
+
+function countUserUsageEvents(tenantId: string, userId: string, eventType: string, from: number, to: number) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM user_usage_events
+    WHERE tenant_id = ? AND user_id = ? AND event_type = ?
+      AND created_at >= ? AND created_at < ?
+  `).get(tenantId, userId, eventType, from, to) as { count?: number } | undefined;
+  return Number(row?.count || 0);
+}
+
+function sumUserUsageTokens(tenantId: string, userId: string, from: number, to: number) {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(tokens), 0) AS tokens
+    FROM user_usage_events
+    WHERE tenant_id = ? AND user_id = ? AND event_type = 'agent_tokens'
+      AND created_at >= ? AND created_at < ?
+  `).get(tenantId, userId, from, to) as { tokens?: number } | undefined;
+  return Number(row?.tokens || 0);
+}
+
+export function getUserPlanQuota(tenantId: string, userId: string): UserPlanQuotaSummary | null {
+  const user = getUserById(userId);
+  if (!user || user.tenantId !== tenantId) return null;
+  return effectiveUserQuota(user);
+}
+
+export function getUserQuotaUsage(tenantId: string, userId: string, at: number = now()): UserQuotaUsageSummary {
+  const quota = getUserPlanQuota(tenantId, userId);
+  const effective = quota?.effective || USER_PLAN_DEFAULTS.free;
+  const dayStart = startOfLocalDay(at);
+  const dayEnd = endOfLocalDay(at);
+  const fiveHourStart = Math.max(0, at - FIVE_HOURS_MS);
+  const weekStart = Math.max(0, at - WEEK_MS);
+  const dailyConversations = countUserUsageEvents(tenantId, userId, 'conversation_started', dayStart, dayEnd);
+  const fiveHourTokens = sumUserUsageTokens(tenantId, userId, fiveHourStart, at + 1);
+  const weeklyTokens = sumUserUsageTokens(tenantId, userId, weekStart, at + 1);
+  return {
+    dailyConversations: {
+      used: dailyConversations,
+      limit: effective.dailyConversationLimit,
+      percent: windowPercent(dailyConversations, effective.dailyConversationLimit),
+      resetsAt: dayEnd,
+    },
+    fiveHourTokens: {
+      used: fiveHourTokens,
+      limit: effective.fiveHourTokenLimit,
+      percent: windowPercent(fiveHourTokens, effective.fiveHourTokenLimit),
+      resetsAt: at + FIVE_HOURS_MS,
+    },
+    weeklyTokens: {
+      used: weeklyTokens,
+      limit: effective.weeklyTokenLimit,
+      percent: windowPercent(weeklyTokens, effective.weeklyTokenLimit),
+      resetsAt: at + WEEK_MS,
+    },
+  };
+}
+
+function quotaExceededResult(
+  planTier: UserPlanTier,
+  window: 'daily' | 'five_hour' | 'weekly',
+  used: number,
+  limit: number,
+  resetsAt: number,
+): UserQuotaCheckResult {
+  const message = window === 'daily'
+    ? '今日免费对话次数已用完'
+    : window === 'five_hour'
+      ? '最近 5 小时 token 额度已用完'
+      : '本周 token 额度已用完';
+  return {
+    ok: false,
+    status: 429,
+    error: 'quota_exceeded',
+    message,
+    quota: { planTier, window, used, limit, resetsAt },
+  };
+}
+
+export function checkUserRunQuota(tenantId: string, userId: string, at: number = now()): UserQuotaCheckResult {
+  const user = getUserById(userId);
+  if (!user || user.tenantId !== tenantId) {
+    return { ok: false, status: 404, error: 'user_not_found', message: 'user not found' };
+  }
+  const quota = effectiveUserQuota(user);
+  const usage = getUserQuotaUsage(tenantId, user.id, at);
+  // 管理员不受配额限制
+  if (user.role === 'tenant_admin') {
+    return { ok: true, userId: user.id, quota, usage };
+  }
+  if (quota.effective.dailyConversationLimit !== null
+    && usage.dailyConversations.used >= quota.effective.dailyConversationLimit) {
+    return quotaExceededResult(
+      quota.planTier,
+      'daily',
+      usage.dailyConversations.used,
+      quota.effective.dailyConversationLimit,
+      usage.dailyConversations.resetsAt,
+    );
+  }
+  if (quota.effective.fiveHourTokenLimit !== null
+    && usage.fiveHourTokens.used >= quota.effective.fiveHourTokenLimit) {
+    return quotaExceededResult(
+      quota.planTier,
+      'five_hour',
+      usage.fiveHourTokens.used,
+      quota.effective.fiveHourTokenLimit,
+      usage.fiveHourTokens.resetsAt,
+    );
+  }
+  if (quota.effective.weeklyTokenLimit !== null
+    && usage.weeklyTokens.used >= quota.effective.weeklyTokenLimit) {
+    return quotaExceededResult(
+      quota.planTier,
+      'weekly',
+      usage.weeklyTokens.used,
+      quota.effective.weeklyTokenLimit,
+      usage.weeklyTokens.resetsAt,
+    );
+  }
+  return { ok: true, userId: user.id, quota, usage };
+}
+
+export function resolveQuotaUserId(identity: AuthIdentity): string | null {
+  if (identity.authType === 'jwt') {
+    const user = getUserById(identity.sub);
+    return user && user.tenantId === identity.tenantId ? user.id : null;
+  }
+  if (!identity.apiKeyId) return null;
+  const row = db.prepare(`
+    SELECT created_by
+    FROM api_keys
+    WHERE id = ? AND tenant_id = ?
+    LIMIT 1
+  `).get(identity.apiKeyId, identity.tenantId) as { created_by?: string | null } | undefined;
+  if (!row?.created_by) return null;
+  const user = getUser(row.created_by);
+  return user && user.tenantId === identity.tenantId ? user.id : null;
+}
+
+export function recordConversationStarted(tenantId: string, userId: string, input: { runId?: string; model?: string } = {}) {
+  db.prepare(`
+    INSERT INTO user_usage_events (id, tenant_id, user_id, event_type, tokens, model, run_id, created_at)
+    VALUES (?, ?, ?, 'conversation_started', 0, ?, ?, ?)
+  `).run(crypto.randomUUID(), tenantId, userId, input.model || null, input.runId || null, now());
+}
+
+export function recordUserRunTokens(
+  tenantId: string,
+  userId: string,
+  info: { model?: string; runId?: string; inputTokens?: number; outputTokens?: number; totalTokens?: number },
+) {
+  const totalTokens = Math.max(0, Math.floor(
+    Number.isFinite(Number(info.totalTokens))
+      ? Number(info.totalTokens)
+      : Number(info.inputTokens || 0) + Number(info.outputTokens || 0),
+  ));
+  db.prepare(`
+    INSERT INTO user_usage_events (id, tenant_id, user_id, event_type, tokens, model, run_id, created_at)
+    VALUES (?, ?, ?, 'agent_tokens', ?, ?, ?, ?)
+  `).run(crypto.randomUUID(), tenantId, userId, totalTokens, info.model || null, info.runId || null, now());
 }
 
 export function deleteUser(tenantId: string, email: string) {
@@ -3452,7 +3939,7 @@ export function getChatSuggestionPreferenceSummary(
   ownerSub: string,
   templateId?: string,
 ): ChatSuggestionPreferenceSummary {
-  const params: unknown[] = [tenantId, ownerSub];
+  const params: Array<string | number | null> = [tenantId, ownerSub];
   let templateWhere = '';
   const normalizedTemplateId = String(templateId || '').trim();
   if (normalizedTemplateId) {
@@ -3809,6 +4296,43 @@ export function listAgentTemplates(tenantId: string, viewerSub?: string | null, 
     .filter((t): t is Record<string, unknown> => Boolean(t && canSeeAgentTemplate(t, viewerSub, viewerRole)));
 }
 
+export function listAgentTemplatePopularity(tenantId: string): Record<string, AgentTemplatePopularity> {
+  const rows = db.prepare(`
+    SELECT template_id,
+           MAX(run_count) AS run_count,
+           MAX(last_run_at) AS last_run_at
+    FROM (
+      SELECT template_id, run_count, last_run_at
+      FROM agent_template_usage
+      WHERE tenant_id = ?
+
+      UNION ALL
+
+      SELECT s.template_id AS template_id,
+             COUNT(DISTINCT m.run_id) AS run_count,
+             MAX(m.timestamp) AS last_run_at
+      FROM chat_sessions s
+      JOIN chat_messages m ON m.session_id = s.id
+      WHERE s.tenant_id = ?
+        AND s.template_id IS NOT NULL
+        AND s.template_id != ''
+        AND m.role = 'assistant'
+        AND m.run_id IS NOT NULL
+        AND m.run_id != ''
+      GROUP BY s.template_id
+    )
+    GROUP BY template_id
+  `).all(tenantId, tenantId) as Array<{ template_id: string; run_count: number; last_run_at: number | null }>;
+
+  return Object.fromEntries(rows.map((row) => [
+    row.template_id,
+    {
+      runCount: Number(row.run_count) || 0,
+      lastRunAt: Number(row.last_run_at) || null,
+    },
+  ]));
+}
+
 export function replaceAgentTemplates(
   tenantId: string,
   templates: Array<Record<string, unknown>>,
@@ -3863,12 +4387,24 @@ export function replaceAgentTemplates(
 }
 
 // ═══ Agent Runs (real SDK execution metering) ═══
-export function recordAgentRun(tenantId: string, info: { sub: string; model: string; durationMs: number; inputTokens: number; outputTokens: number; costUsd?: number; status: RunOutcome }) {
+export function recordAgentRun(tenantId: string, info: { sub: string; model: string; durationMs: number; inputTokens: number; outputTokens: number; costUsd?: number; status: RunOutcome; templateId?: string }) {
   ensureQuotaForTenant(tenantId);
   const seconds = Math.max(0, Math.round(info.durationMs / 1000));
   db.prepare('UPDATE quotas SET weekly_run_count_used = weekly_run_count_used + 1, monthly_active_seconds_used = monthly_active_seconds_used + ? WHERE tenant_id = ?').run(seconds, tenantId);
+  const templateId = String(info.templateId || '').trim();
+  if (templateId) {
+    const timestamp = now();
+    db.prepare(`
+      INSERT INTO agent_template_usage (tenant_id, template_id, run_count, last_run_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(tenant_id, template_id) DO UPDATE SET
+        run_count = run_count + 1,
+        last_run_at = excluded.last_run_at
+    `).run(tenantId, templateId, timestamp);
+  }
   audit(tenantId, 'agent_run', info.sub, 'user', `run:${info.model}`, {
     model: info.model,
+    templateId: templateId || undefined,
     durationMs: info.durationMs,
     inputTokens: info.inputTokens,
     outputTokens: info.outputTokens,

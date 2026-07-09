@@ -19,6 +19,7 @@
     "smoke:agent-visibility": "node scripts/smoke-agent-visibility.mjs",
     "smoke:agent-import": "node scripts/smoke-agent-import.mjs",
     "smoke:provider-routing": "tsx scripts/smoke-provider-routing.mjs",
+    "smoke:user-plan-quotas": "node scripts/smoke-user-plan-quotas.mjs",
     "smoke:permission-rules": "node scripts/smoke-permission-rules.mjs",
     "smoke:skills-public": "node scripts/smoke-skills-public.mjs",
     "smoke:visuals": "node scripts/smoke-visuals.mjs",

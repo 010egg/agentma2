@@ -14,6 +14,10 @@ export type StoredAuthUser = {
   name: string;
   tenantId?: string;
   role?: 'tenant_admin' | 'team_admin' | 'member';
+  planTier?: 'free' | 'plus' | 'pro' | 'max';
+  dailyConversationLimit?: number | null;
+  fiveHourTokenLimit?: number | null;
+  weeklyTokenLimit?: number | null;
   inputSuggestionModel?: string;
 };
 

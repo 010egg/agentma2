@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import readXlsxFile from 'read-excel-file/node';
 import fs from 'node:fs';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
@@ -20,6 +21,7 @@ import {
   createTenantUser,
   createTeam,
   createVisual,
+  checkUserRunQuota,
   archivePublicSkill,
   deletePublicSkill,
   deleteDatasource,
@@ -51,10 +53,11 @@ import {
   listKnowledgeSources,
   listPermissionRules,
   listProviderProfiles,
+  listAgentTemplatePopularity,
   listPublicSkills,
   listTeamMembers,
   listTeams,
-  listUsers,
+  listUsersWithQuota,
   listVisuals,
   loginUser,
   joinChatSession,
@@ -63,7 +66,9 @@ import {
   registerUser,
   removeTeamMember,
   restorePublicSkill,
+  recordConversationStarted,
   recordLearnedSkill,
+  recordUserRunTokens,
   listLearnedSkills,
   replaceHookRules,
   replaceKnowledgeSources,
@@ -72,6 +77,7 @@ import {
   replaceAgentTemplates,
   recordChatSuggestionShown,
   resolveProviderProfileForModel,
+  resolveQuotaUserId,
   revokeApiKey,
   saveChatSession,
   scanKnowledgeSources,
@@ -84,6 +90,7 @@ import {
   updatePublicSkill,
   updateQuota,
   updateTenant,
+  updateUserPlanQuota,
   updateUserPreferences,
   updateUserRole,
 } from './server-store.ts';
@@ -170,6 +177,16 @@ function writeSse(res: express.Response, event: unknown) {
   try {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   } catch {}
+}
+
+function sendQuotaFailure(res: express.Response, result: ReturnType<typeof checkUserRunQuota>) {
+  if (result.ok) return false;
+  res.status(result.status).json({
+    error: result.error,
+    message: result.message,
+    ...(result.quota ? { quota: result.quota } : {}),
+  });
+  return true;
 }
 
 function emitServerRun(run: ServerOwnedRun, event: AgentEvent) {
@@ -1535,7 +1552,15 @@ function agentTemplateActor(auth: { sub: string; email?: string }) {
 type AgentTemplateAuth = { tenantId: string; sub: string; email?: string; role?: Role | null };
 
 function listVisibleAgentTemplates(auth: AgentTemplateAuth) {
-  return listAgentTemplates(auth.tenantId, agentTemplateActor(auth), auth.role).map(normalizeAgentTemplateForApi);
+  const popularityByTemplate = listAgentTemplatePopularity(auth.tenantId);
+  return listAgentTemplates(auth.tenantId, agentTemplateActor(auth), auth.role)
+    .map((template) => {
+      const id = String(template.id || '');
+      return normalizeAgentTemplateForApi({
+        ...template,
+        popularity: popularityByTemplate[id] || { runCount: 0, lastRunAt: null },
+      });
+    });
 }
 
 function getVisibleAgentTemplate(auth: AgentTemplateAuth, templateId: string) {
@@ -2128,6 +2153,14 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   if (!selectedModel) { res.status(400).json({ error: 'no model configured' }); return; }
   const runtimeProvider = resolveRuntimeProvider(req.auth.tenantId, selectedModel, provider, undefined, req.body?.providerProfiles);
   if (!runtimeProvider.apiKey) { res.status(400).json({ error: 'no ANTHROPIC_AUTH_TOKEN' }); return; }
+  const quotaUserId = resolveQuotaUserId(req.auth);
+  if (quotaUserId) {
+    const quotaCheck = checkUserRunQuota(req.auth.tenantId, quotaUserId);
+    if (!quotaCheck.ok) {
+      sendQuotaFailure(res, quotaCheck);
+      return;
+    }
+  }
   const visualPreprocessEnabled = typeof req.body?.visualPreprocessEnabled === 'boolean'
     ? req.body.visualPreprocessEnabled === true
     : template?.visualPreprocessDefault === true;
@@ -2164,6 +2197,9 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   cleanupServerRuns();
   const abortController = new AbortController();
   const runId = crypto.randomUUID();
+  if (quotaUserId) {
+    try { recordConversationStarted(req.auth.tenantId, quotaUserId, { runId, model: selectedModel }); } catch {}
+  }
   const ownerSub = getChatOwnerSub(req.auth);
   const run: ServerOwnedRun = {
     id: runId,
@@ -2202,7 +2238,11 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   serverRuns.set(runId, run);
   persistServerRunPendingMessage(run);
   writeSse(res, { type: 'run_started', runId, sessionId });
+  const heartbeat = setInterval(() => {
+    writeSse(res, { type: 'heartbeat', runId, at: Date.now() });
+  }, 10_000);
   req.on('close', () => {
+    clearInterval(heartbeat);
     run.subscribers.delete(res);
   });
 
@@ -2258,6 +2298,7 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   const requestUserQuestion = createAskUserQuestionRequester({ emit, tenantId: req.auth.tenantId });
   const toolsList = Array.isArray(requestTools) ? requestTools.map((t: any) => t?.name).filter(Boolean) : undefined;
 
+  let userTokensRecorded = false;
   void runAgent({
     prompt: runPrompt,
     promptImages,
@@ -2284,13 +2325,28 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     tenantId: req.auth.tenantId,
     sub: req.auth.sub,
     role: req.auth.role,
+    templateId: templateId || undefined,
     emit,
     requestPermission,
     requestUserQuestion,
     abortController,
+  }).then((result) => {
+    if (quotaUserId) {
+      recordUserRunTokens(req.auth.tenantId, quotaUserId, {
+        runId,
+        model: selectedModel,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      });
+      userTokensRecorded = true;
+    }
   }).catch((error) => {
     console.error('[chat-run] failed', runId, (error as Error).message);
   }).finally(() => {
+    if (quotaUserId && !userTokensRecorded) {
+      try { recordUserRunTokens(req.auth.tenantId, quotaUserId, { runId, model: selectedModel, totalTokens: 0 }); } catch {}
+    }
+    clearInterval(heartbeat);
     if (!run.completedAt) {
       const outcome = run.outcome || (abortController.signal.aborted ? 'stopped' : 'provider_error');
       const finalContent = run.text || (run.cachedErrorMessage ? `错误: ${run.cachedErrorMessage}` : '');
@@ -2573,7 +2629,20 @@ app.post('/api/auth/register', (req, res) => {
   const result = registerUser(name || email.split('@')[0], email, password);
   if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
   const token = signJWT({ sub: result.user.id, tenantId: result.tenantId });
-  res.json({ token, id: result.user.id, username: result.user.username, email: result.user.email, name: result.user.name, tenantId: result.tenantId, role: result.user.role });
+  res.json({
+    token,
+    id: result.user.id,
+    username: result.user.username,
+    email: result.user.email,
+    name: result.user.name,
+    tenantId: result.tenantId,
+    role: result.user.role,
+    planTier: result.user.planTier,
+    dailyConversationLimit: result.user.dailyConversationLimit,
+    fiveHourTokenLimit: result.user.fiveHourTokenLimit,
+    weeklyTokenLimit: result.user.weeklyTokenLimit,
+    inputSuggestionModel: result.user.inputSuggestionModel || '',
+  });
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -2588,6 +2657,10 @@ app.post('/api/auth/login', (req, res) => {
     name: result.user.name,
     tenantId: result.user.tenantId,
     role: result.user.role,
+    planTier: result.user.planTier,
+    dailyConversationLimit: result.user.dailyConversationLimit,
+    fiveHourTokenLimit: result.user.fiveHourTokenLimit,
+    weeklyTokenLimit: result.user.weeklyTokenLimit,
     inputSuggestionModel: result.user.inputSuggestionModel || '',
   });
 });
@@ -2630,7 +2703,7 @@ app.patch('/api/tenant', authMiddleware, requireAdmin, (req: any, res) => {
 
 // ═══ Users Routes ═══
 app.get('/api/users', authMiddleware, (req: any, res) => {
-  res.json(listUsers(req.auth.tenantId));
+  res.json(listUsersWithQuota(req.auth.tenantId));
 });
 
 app.post('/api/users', authMiddleware, requireAdmin, (req: any, res) => {
@@ -2643,16 +2716,25 @@ app.post('/api/users', authMiddleware, requireAdmin, (req: any, res) => {
   );
   if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
   audit(req.auth.tenantId, 'create_user', req.auth.sub, 'user', `user:${result.user.email}`, { role: result.user.role });
-  res.json(result.user);
+  res.json(listUsersWithQuota(req.auth.tenantId).find((user) => user.email === result.user.email) || result.user);
 });
 
 app.patch('/api/users/:email', authMiddleware, requireAdmin, (req: any, res) => {
   const role = req.body?.role;
-  if (!['tenant_admin', 'team_admin', 'member'].includes(role)) { res.status(400).json({ error: 'invalid role' }); return; }
-  const user = updateUserRole(req.auth.tenantId, req.params.email, role);
-  if (!user) { res.status(404).json({ error: 'not found' }); return; }
-  audit(req.auth.tenantId, 'update_user_role', req.auth.sub, 'user', `user:${req.params.email}`, { role: user.role });
-  res.json(user);
+  if (role !== undefined) {
+    if (!['tenant_admin', 'team_admin', 'member'].includes(role)) { res.status(400).json({ error: 'invalid role' }); return; }
+    if (req.params.email === req.auth.email && role !== req.auth.role) { res.status(400).json({ error: '不能修改自己的角色' }); return; }
+    const user = updateUserRole(req.auth.tenantId, req.params.email, role);
+    if (!user) { res.status(404).json({ error: 'not found' }); return; }
+  }
+  const quotaResult = updateUserPlanQuota(req.auth.tenantId, req.params.email, req.body || {});
+  if (!quotaResult.ok) { res.status(quotaResult.status).json({ error: quotaResult.error }); return; }
+  audit(req.auth.tenantId, 'update_user', req.auth.sub, 'user', `user:${req.params.email}`, {
+    role: quotaResult.user.role,
+    planTier: quotaResult.user.planTier,
+    quota: quotaResult.user.quota.effective,
+  });
+  res.json(quotaResult.user);
 });
 
 app.delete('/api/users/:email', authMiddleware, requireAdmin, (req: any, res) => {
@@ -3140,6 +3222,20 @@ type AgentImportReport = {
   skipped: Array<{ path: string; reason: string }>;
   notes: string[];
 };
+type AgentImportSourceFile = Pick<Express.Multer.File, 'originalname' | 'buffer'>;
+type AgentImportTarget = {
+  currentTemplates: Record<string, unknown>[];
+  mergeTargetId: string;
+  existing: Record<string, unknown> | null;
+  templateId: string;
+};
+type AgentGitImportSource = {
+  href: string;
+  displayUrl: string;
+};
+
+const MAX_AGENT_GIT_REF_LENGTH = 160;
+const AGENT_GIT_CLONE_TIMEOUT_MS = 120_000;
 
 const agentImportUpload = multer({
   storage: multer.memoryStorage(),
@@ -3220,6 +3316,196 @@ function importPathBlockedReason(relativePath: string) {
   const blockedName = parts.find((part) => BLOCKED_AGENT_IMPORT_BASENAMES.has(part));
   if (blockedName) return `blocked path: ${blockedName}`;
   return '';
+}
+
+function isBlockedIpv4Address(hostname: string) {
+  const parts = hostname.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  return a === 0
+    || a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+    || a >= 224;
+}
+
+function isBlockedIpv6Address(hostname: string) {
+  const lower = hostname.toLowerCase();
+  if (lower === '::' || lower === '::1') return true;
+  if (lower.startsWith('::ffff:')) return isBlockedIpv4Address(lower.slice('::ffff:'.length));
+  const firstHextet = Number.parseInt(lower.split(':')[0] || '0', 16);
+  if (!Number.isFinite(firstHextet)) return false;
+  return (firstHextet & 0xfe00) === 0xfc00
+    || (firstHextet & 0xffc0) === 0xfe80
+    || (firstHextet & 0xff00) === 0xff00;
+}
+
+function isBlockedGitImportHost(hostname: string) {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) return true;
+  const ipVersion = net.isIP(host);
+  if (ipVersion === 4) return isBlockedIpv4Address(host);
+  if (ipVersion === 6) return isBlockedIpv6Address(host);
+  return false;
+}
+
+function parseAgentGitImportUrl(input: unknown): AgentGitImportSource {
+  const raw = typeof input === 'string' ? input.trim() : '';
+  if (!raw) throw makeHttpError('请输入 Git 仓库 URL', 400);
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw makeHttpError('Git 仓库 URL 格式无效', 400);
+  }
+  if (parsed.protocol !== 'https:') throw makeHttpError('Git 导入仅支持 https:// 仓库 URL', 400);
+  if (!parsed.hostname) throw makeHttpError('Git 仓库 URL 缺少 hostname', 400);
+  if (parsed.username || parsed.password) throw makeHttpError('Git 导入不支持在 URL 中携带用户名或密码', 400);
+  if (parsed.search || parsed.hash) throw makeHttpError('Git 仓库 URL 不支持 query 或 hash', 400);
+  if (!parsed.pathname || parsed.pathname === '/') throw makeHttpError('Git 仓库 URL 缺少仓库路径', 400);
+  if (isBlockedGitImportHost(parsed.hostname)) throw makeHttpError('Git 导入不允许 localhost、内网或保留地址', 400);
+  return {
+    href: parsed.href,
+    displayUrl: `${parsed.origin}${parsed.pathname}`.replace(/\/$/, ''),
+  };
+}
+
+function normalizeAgentGitImportRef(input: unknown) {
+  const ref = typeof input === 'string' ? input.trim() : '';
+  if (!ref) return '';
+  if (ref.length > MAX_AGENT_GIT_REF_LENGTH) throw makeHttpError(`Git ref 不能超过 ${MAX_AGENT_GIT_REF_LENGTH} 个字符`, 400);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref)
+    || ref.startsWith('-')
+    || ref.includes('..')
+    || ref.includes('@{')
+    || ref.includes('//')
+    || ref.endsWith('/')
+    || ref.endsWith('.')) {
+    throw makeHttpError('Git ref 格式无效，仅支持普通 branch、tag 或 commit-ish 字符', 400);
+  }
+  return ref;
+}
+
+function gitImportEnv(homeDir: string): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH || '',
+    HOME: homeDir,
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'never',
+    LANG: process.env.LANG || 'C',
+  };
+}
+
+function gitImportCommandError(label: string, error: unknown) {
+  const err = error as Error & { code?: string; stderr?: string; stdout?: string };
+  if (err.code === 'ENOENT') return makeHttpError('服务器未安装 git，无法通过仓库导入', 500);
+  const details = String(err.stderr || err.stdout || err.message || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join('; ')
+    .slice(0, 500);
+  return makeHttpError(details ? `${label}失败: ${details}` : `${label}失败`, 400);
+}
+
+async function runGitImportCommand(label: string, args: string[], cwd: string, homeDir: string) {
+  try {
+    await execFileAsync('git', args, {
+      cwd,
+      env: gitImportEnv(homeDir),
+      timeout: AGENT_GIT_CLONE_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    throw gitImportCommandError(label, error);
+  }
+}
+
+async function cloneAgentGitImport(source: AgentGitImportSource, ref: string, tempRoot: string) {
+  const targetDir = path.join(tempRoot, 'repo');
+  const cloneArgs = ['clone', '--depth', '1', '--single-branch'];
+  if (ref) cloneArgs.push('--branch', ref);
+  cloneArgs.push(source.href, targetDir);
+
+  try {
+    await runGitImportCommand('Git clone ', cloneArgs, tempRoot, tempRoot);
+    return targetDir;
+  } catch (cloneError) {
+    if (!ref) throw cloneError;
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    await runGitImportCommand('Git clone ', ['clone', '--depth', '1', source.href, targetDir], tempRoot, tempRoot);
+    try {
+      await runGitImportCommand('Git fetch ref ', ['fetch', '--depth', '1', 'origin', ref], targetDir, tempRoot);
+      await runGitImportCommand('Git checkout ref ', ['checkout', '--detach', 'FETCH_HEAD'], targetDir, tempRoot);
+      return targetDir;
+    } catch (refError) {
+      throw refError;
+    }
+  }
+}
+
+function collectAgentGitImportFiles(rootDir: string) {
+  const resolvedRoot = path.resolve(rootDir);
+  const files: AgentImportSourceFile[] = [];
+  const relativePaths: string[] = [];
+  const skipped: AgentImportReport['skipped'] = [];
+  let totalBytes = 0;
+
+  const walk = (dir: string, relativeDir: string) => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const rawRelativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      const relativePath = safeUploadedAgentImportPath(rawRelativePath);
+      if (!relativePath) {
+        skipped.push({ path: rawRelativePath, reason: 'invalid path' });
+        continue;
+      }
+      const blockedReason = importPathBlockedReason(relativePath);
+      if (blockedReason) {
+        skipped.push({ path: relativePath, reason: blockedReason });
+        continue;
+      }
+
+      const absolutePath = path.resolve(path.join(dir, entry.name));
+      if (absolutePath !== resolvedRoot && !absolutePath.startsWith(resolvedRoot + path.sep)) {
+        skipped.push({ path: relativePath, reason: 'path outside repository' });
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        skipped.push({ path: relativePath, reason: 'symbolic link' });
+        continue;
+      }
+      if (entry.isDirectory()) {
+        walk(absolutePath, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        skipped.push({ path: relativePath, reason: 'unsupported file type' });
+        continue;
+      }
+
+      const stat = fs.statSync(absolutePath);
+      if (stat.size > MAX_AGENT_IMPORT_FILE_BYTES) {
+        throw makeHttpError(`单个文件不能超过 ${formatUploadBytes(MAX_AGENT_IMPORT_FILE_BYTES)}: ${relativePath}`, 400);
+      }
+      totalBytes += stat.size;
+      if (totalBytes > MAX_AGENT_IMPORT_TOTAL_BYTES) {
+        throw makeHttpError(`导入总大小不能超过 ${formatUploadBytes(MAX_AGENT_IMPORT_TOTAL_BYTES)}`, 400);
+      }
+      if (files.length >= MAX_AGENT_IMPORT_FILES) {
+        throw makeHttpError(`单次最多导入 ${MAX_AGENT_IMPORT_FILES} 个文件`, 400);
+      }
+      files.push({ originalname: path.basename(relativePath), buffer: fs.readFileSync(absolutePath) });
+      relativePaths.push(relativePath);
+    }
+  };
+
+  walk(resolvedRoot, '');
+  return { files, relativePaths, skipped };
 }
 
 function categorizeAgentImportPath(relativePath: string): AgentImportCategory {
@@ -3323,7 +3609,7 @@ function replaceDirectoryAtomic(tmpDir: string, destDir: string) {
   }
 }
 
-function unpackAgentImport(auth: any, templateId: string, files: Express.Multer.File[], relativePathInputs: string[]) {
+function unpackAgentImport(auth: any, templateId: string, files: AgentImportSourceFile[], relativePathInputs: string[]) {
   const seedDir = agentSeedDir(auth.tenantId, templateId);
   const report: AgentImportReport = {
     templateId,
@@ -3449,8 +3735,43 @@ function importedAgentTemplateFromReport(existing: Record<string, unknown> | nul
   });
 }
 
-function summarizeAgentImportReport(report: AgentImportReport) {
+function resolveAgentImportTarget(auth: AgentTemplateAuth, input: Record<string, unknown>): AgentImportTarget {
+  const currentTemplates = listVisibleAgentTemplates(auth);
+  const mode = String(input.mode || 'new').trim();
+  const mergeTargetId = mode.startsWith('merge:')
+    ? mode.slice('merge:'.length).trim()
+    : mode === 'merge'
+      ? String(input.templateId || '').trim()
+      : '';
+  const existing = mergeTargetId
+    ? currentTemplates.find((template) => String(template.id || '') === mergeTargetId)
+    : null;
+  if (mergeTargetId && !existing) throw makeHttpError('目标 Agent 模板不存在', 404);
   return {
+    currentTemplates,
+    mergeTargetId,
+    existing: existing || null,
+    templateId: mergeTargetId || crypto.randomUUID(),
+  };
+}
+
+function saveImportedAgentTemplate(
+  auth: AgentTemplateAuth,
+  target: AgentImportTarget,
+  report: AgentImportReport,
+  input: Record<string, unknown>,
+) {
+  const template = importedAgentTemplateFromReport(target.existing, report, input);
+  const nextTemplates = target.mergeTargetId
+    ? target.currentTemplates.map((item) => String(item.id || '') === target.templateId ? template : item)
+    : [template, ...target.currentTemplates.filter((item) => String(item.id || '') !== target.templateId)];
+  const saved = replaceAgentTemplates(auth.tenantId, nextTemplates, agentTemplateActor(auth), auth.role).map(normalizeAgentTemplateForApi);
+  return saved.find((item) => String(item.id || '') === target.templateId) || template;
+}
+
+function summarizeAgentImportReport(report: AgentImportReport, extra: Record<string, unknown> = {}) {
+  return {
+    ...extra,
     templateId: report.templateId,
     seedDir: report.seedDir,
     unpacked: report.unpacked.length,
@@ -4325,32 +4646,47 @@ app.post('/api/agents/import', authMiddleware, parseAgentImportUpload, (req: any
     const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
     if (!files.length) { res.status(400).json({ error: '请选择要导入的项目目录' }); return; }
 
-    const currentTemplates = listVisibleAgentTemplates(req.auth);
-    const mode = String(req.body?.mode || 'new').trim();
-    const mergeTargetId = mode.startsWith('merge:')
-      ? mode.slice('merge:'.length).trim()
-      : mode === 'merge'
-        ? String(req.body?.templateId || '').trim()
-        : '';
-    const existing = mergeTargetId
-      ? currentTemplates.find((template) => String(template.id || '') === mergeTargetId)
-      : null;
-    if (mergeTargetId && !existing) { res.status(404).json({ error: '目标 Agent 模板不存在' }); return; }
-
-    const templateId = mergeTargetId || crypto.randomUUID();
+    const input = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const target = resolveAgentImportTarget(req.auth, input);
     const relativePaths = uploadedBodyStrings(req.body?.relativePaths);
-    const report = unpackAgentImport(req.auth, templateId, files, relativePaths);
-    const template = importedAgentTemplateFromReport(existing || null, report, req.body || {});
-    const nextTemplates = mergeTargetId
-      ? currentTemplates.map((item) => String(item.id || '') === templateId ? template : item)
-      : [template, ...currentTemplates.filter((item) => String(item.id || '') !== templateId)];
-    const saved = replaceAgentTemplates(req.auth.tenantId, nextTemplates, agentTemplateActor(req.auth), req.auth.role).map(normalizeAgentTemplateForApi);
-    const savedTemplate = saved.find((item) => String(item.id || '') === templateId) || template;
-    audit(req.auth.tenantId, 'import_agent', req.auth.sub, 'agent', templateId, summarizeAgentImportReport(report));
+    const report = unpackAgentImport(req.auth, target.templateId, files, relativePaths);
+    const savedTemplate = saveImportedAgentTemplate(req.auth, target, report, input);
+    audit(req.auth.tenantId, 'import_agent', req.auth.sub, 'agent', target.templateId, summarizeAgentImportReport(report));
     res.json({ template: savedTemplate, report });
   } catch (error) {
     const err = error as Error & { status?: number };
     res.status(err.status || 400).json({ error: err.message || '导入 Agent 失败' });
+  }
+});
+
+app.post('/api/agents/import/git', authMiddleware, async (req: any, res) => {
+  let tempRoot = '';
+  try {
+    const input = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const source = parseAgentGitImportUrl(input.url);
+    const ref = normalizeAgentGitImportRef(input.ref);
+    const target = resolveAgentImportTarget(req.auth, input);
+
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agentma-git-import-'));
+    const repoDir = await cloneAgentGitImport(source, ref, tempRoot);
+    const collected = collectAgentGitImportFiles(repoDir);
+    const report = unpackAgentImport(req.auth, target.templateId, collected.files, collected.relativePaths);
+    report.skipped.push(...collected.skipped);
+    report.notes.push(`Git 仓库: ${source.displayUrl}${ref ? `#${ref}` : ''}`);
+    report.notes.push('Git 导入第一版不解析 DNS 防内网重绑定；仅拦截 localhost 和字面量内网/保留 IP。');
+
+    const savedTemplate = saveImportedAgentTemplate(req.auth, target, report, input);
+    audit(req.auth.tenantId, 'import_agent', req.auth.sub, 'agent', target.templateId, summarizeAgentImportReport(report, {
+      source: 'git',
+      gitUrl: source.displayUrl,
+      gitRef: ref || '<default>',
+    }));
+    res.json({ template: savedTemplate, report });
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 400).json({ error: err.message || '导入 Git Agent 失败' });
+  } finally {
+    if (tempRoot) fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
@@ -4409,7 +4745,7 @@ app.put('/api/agents', authMiddleware, (req: any, res) => {
     fs.rmSync(agentSeedDir(req.auth.tenantId, templateId), { recursive: true, force: true });
   }
   audit(req.auth.tenantId, 'replace_agents', req.auth.sub, 'user', `agents:${req.auth.tenantId}`, { count: saved.length });
-  res.json(saved.map(normalizeAgentTemplateForApi));
+  res.json(listVisibleAgentTemplates(req.auth));
 });
 
 // ═══ Visual Artifacts Routes ═══
@@ -4681,12 +5017,24 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
   const runtimeProvider = resolveRuntimeProvider(req.auth.tenantId, selectedModel, provider, tmpl?.providerOverrides, req.body?.providerProfiles);
   if (!runtimeProvider.apiKey) { res.status(400).json({ error: 'no api key' }); return; }
   console.log(`[provider-route] agents/run model=${selectedModel} source=${runtimeProvider.source} baseUrl=${describeBaseUrl(runtimeProvider.baseUrl)}`);
+  const quotaUserId = resolveQuotaUserId(req.auth);
+  if (quotaUserId) {
+    const quotaCheck = checkUserRunQuota(req.auth.tenantId, quotaUserId);
+    if (!quotaCheck.ok) {
+      sendQuotaFailure(res, quotaCheck);
+      return;
+    }
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
+  const runId = crypto.randomUUID();
+  if (quotaUserId) {
+    try { recordConversationStarted(req.auth.tenantId, quotaUserId, { runId, model: selectedModel }); } catch {}
+  }
   const emit = (e: any) => { try { res.write(`data: ${JSON.stringify(e)}\n\n`); } catch {} };
   const abortController = new AbortController();
   let didEnd = false;
@@ -4701,32 +5049,49 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
   const requestPermission = createPermissionRequester({ emit, sessionAllow, tenantId: req.auth.tenantId });
   const requestUserQuestion = createAskUserQuestionRequester({ emit, tenantId: req.auth.tenantId });
 
-  await runAgent({
-    prompt,
-    systemPrompt: typeof tmpl?.systemPrompt === 'string' ? tmpl.systemPrompt : undefined,
-    model: selectedModel,
-    baseUrl: runtimeProvider.baseUrl,
-    apiKey: runtimeProvider.apiKey,
-    tools: Array.isArray(tmpl?.tools) ? tmpl.tools : undefined,
-    subagents,
-    skills,
-    mcpServers,
-    outputFormat: tmpl?.outputSchema ? { type: 'json_schema', schema: tmpl.outputSchema } : undefined,
-    enableFileCheckpointing: tmpl?.enableFileCheckpointing === true || undefined,
-    useKnowledge: tmpl?.useKnowledge === true || knowledgeSourceIds.length > 0,
-    knowledgeSourceIds,
-    datasourceIds,
-    maxTurns: Number(tmpl?.maxTurns) || 20,
-    effort: (tmpl?.effort as EffortLevel | undefined),
-    tenantId: req.auth.tenantId,
-    sub: req.auth.sub,
-    role: req.auth.role,
-    seedDir: resolveAgentSeedDirForTemplate(req.auth.tenantId, storedTemplate || tmpl),
-    emit,
-    requestPermission,
-    requestUserQuestion,
-    abortController,
-  });
+  let userTokensRecorded = false;
+  try {
+    const result = await runAgent({
+      prompt,
+      systemPrompt: typeof tmpl?.systemPrompt === 'string' ? tmpl.systemPrompt : undefined,
+      model: selectedModel,
+      baseUrl: runtimeProvider.baseUrl,
+      apiKey: runtimeProvider.apiKey,
+      tools: Array.isArray(tmpl?.tools) ? tmpl.tools : undefined,
+      subagents,
+      skills,
+      mcpServers,
+      outputFormat: tmpl?.outputSchema ? { type: 'json_schema', schema: tmpl.outputSchema } : undefined,
+      enableFileCheckpointing: tmpl?.enableFileCheckpointing === true || undefined,
+      useKnowledge: tmpl?.useKnowledge === true || knowledgeSourceIds.length > 0,
+      knowledgeSourceIds,
+      datasourceIds,
+      maxTurns: Number(tmpl?.maxTurns) || 20,
+      effort: (tmpl?.effort as EffortLevel | undefined),
+      tenantId: req.auth.tenantId,
+      sub: req.auth.sub,
+      role: req.auth.role,
+      seedDir: resolveAgentSeedDirForTemplate(req.auth.tenantId, storedTemplate || tmpl),
+      templateId: String(storedTemplate?.id || tmpl?.id || '').trim() || undefined,
+      emit,
+      requestPermission,
+      requestUserQuestion,
+      abortController,
+    });
+    if (quotaUserId) {
+      recordUserRunTokens(req.auth.tenantId, quotaUserId, {
+        runId,
+        model: selectedModel,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      });
+      userTokensRecorded = true;
+    }
+  } finally {
+    if (quotaUserId && !userTokensRecorded) {
+      try { recordUserRunTokens(req.auth.tenantId, quotaUserId, { runId, model: selectedModel, totalTokens: 0 }); } catch {}
+    }
+  }
   didEnd = true;
   res.end();
 });

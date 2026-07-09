@@ -56,7 +56,8 @@ async function readChatError(response: Response) {
   const text = await response.text().catch(() => '');
   if (!text) return `API 错误: ${response.status}`;
   try {
-    const data = JSON.parse(text) as { error?: unknown };
+    const data = JSON.parse(text) as { error?: unknown; message?: unknown };
+    if (data?.message) return String(data.message);
     return data?.error ? String(data.error) : `API 错误: ${response.status}`;
   } catch {
     return text.slice(0, 240) || `API 错误: ${response.status}`;

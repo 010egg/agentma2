@@ -9,6 +9,10 @@ interface User {
   name: string;
   tenantId?: string;
   role?: 'tenant_admin' | 'team_admin' | 'member';
+  planTier?: 'free' | 'plus' | 'pro' | 'max';
+  dailyConversationLimit?: number | null;
+  fiveHourTokenLimit?: number | null;
+  weeklyTokenLimit?: number | null;
   inputSuggestionModel?: string;
 }
 
@@ -35,6 +39,10 @@ function buildAuthUser(data: any, fallback?: Partial<User> | null): User {
     name: data.name || fallback?.name || '',
     tenantId: data.tenantId || fallback?.tenantId,
     role: data.role || fallback?.role,
+    planTier: data.planTier || fallback?.planTier,
+    dailyConversationLimit: data.dailyConversationLimit ?? fallback?.dailyConversationLimit ?? null,
+    fiveHourTokenLimit: data.fiveHourTokenLimit ?? fallback?.fiveHourTokenLimit ?? null,
+    weeklyTokenLimit: data.weeklyTokenLimit ?? fallback?.weeklyTokenLimit ?? null,
     inputSuggestionModel: typeof data.inputSuggestionModel === 'string'
       ? data.inputSuggestionModel
       : fallback?.inputSuggestionModel || '',
@@ -56,7 +64,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!token) return;
-    if (user?.tenantId && user?.role && user?.inputSuggestionModel !== undefined) return;
 
     let cancelled = false;
     const hydrate = async () => {
@@ -64,7 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
         if (!res.ok) return;
         const data = await res.json();
-        const nextUser = buildAuthUser(data, user);
+        const nextUser = buildAuthUser(data, getStoredAuthUser() || user);
         if (cancelled) return;
         saveUser(nextUser);
         setUser(nextUser);
@@ -73,7 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     void hydrate();
     return () => { cancelled = true; };
-  }, [token, user]);
+  }, [token]);
 
   const refreshUser = useCallback(async () => {
     if (!getStoredAuthToken()) return null;

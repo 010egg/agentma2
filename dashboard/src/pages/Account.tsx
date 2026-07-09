@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import { getAuthHeaders } from '../utils/client-runtime';
 import type { ProviderProfile } from '../simulator/types';
 import { createProviderProfile, fetchProviderModels, listProviderModels, loadProviderProfiles, mergeProviderProfiles, saveProviderProfiles, splitAvailableModels } from '../utils/providers';
@@ -38,9 +38,98 @@ type QuotaUsageSummary = {
   recentRuns: QuotaUsageRun[];
 };
 
+type UserPlanTier = 'free' | 'plus' | 'pro' | 'max';
+
+type UserQuotaLimits = {
+  dailyConversationLimit: number | null;
+  fiveHourTokenLimit: number | null;
+  weeklyTokenLimit: number | null;
+};
+
+type UserQuotaWindowUsage = {
+  used: number;
+  limit: number | null;
+  percent: number;
+  resetsAt: number;
+};
+
+type ManagedUser = {
+  id?: string;
+  username?: string;
+  email: string;
+  name: string;
+  role: 'tenant_admin' | 'team_admin' | 'member';
+  planTier?: UserPlanTier;
+  dailyConversationLimit?: number | null;
+  fiveHourTokenLimit?: number | null;
+  weeklyTokenLimit?: number | null;
+  quota?: {
+    planTier: UserPlanTier;
+    defaults: UserQuotaLimits;
+    overrides: UserQuotaLimits;
+    effective: UserQuotaLimits;
+  };
+  usage?: {
+    dailyConversations: UserQuotaWindowUsage;
+    fiveHourTokens: UserQuotaWindowUsage;
+    weeklyTokens: UserQuotaWindowUsage;
+  };
+  createdAt: number;
+};
+
+type QuotaDraft = {
+  dailyConversationLimit: string;
+  fiveHourTokenLimit: string;
+  weeklyTokenLimit: string;
+};
+
+const PLAN_DEFAULTS: Record<UserPlanTier, UserQuotaLimits> = {
+  free: { dailyConversationLimit: 5, fiveHourTokenLimit: null, weeklyTokenLimit: null },
+  plus: { dailyConversationLimit: null, fiveHourTokenLimit: 1_000_000, weeklyTokenLimit: 5_000_000 },
+  pro: { dailyConversationLimit: null, fiveHourTokenLimit: 5_000_000, weeklyTokenLimit: 25_000_000 },
+  max: { dailyConversationLimit: null, fiveHourTokenLimit: 20_000_000, weeklyTokenLimit: 100_000_000 },
+};
+
+const PLAN_LABELS: Record<UserPlanTier, string> = {
+  free: 'Free',
+  plus: 'Plus',
+  pro: 'Pro',
+  max: 'Max',
+};
+
 function formatNumber(value: unknown) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n.toLocaleString() : '0';
+}
+
+function formatLimit(value: number | null | undefined, unit: string) {
+  return value === null || value === undefined ? '无限' : `${formatNumber(value)} ${unit}`;
+}
+
+function formatQuotaWindow(usage?: UserQuotaWindowUsage, unit = '') {
+  if (!usage) return '0 / -';
+  const limit = usage.limit === null ? '无限' : formatNumber(usage.limit);
+  return `${formatNumber(usage.used)} / ${limit}${unit ? ` ${unit}` : ''}`;
+}
+
+function normalizePlanTier(value: unknown): UserPlanTier {
+  return ['free', 'plus', 'pro', 'max'].includes(String(value || '')) ? value as UserPlanTier : 'free';
+}
+
+function effectiveUserQuota(user: ManagedUser): UserQuotaLimits {
+  return user.quota?.effective || PLAN_DEFAULTS[normalizePlanTier(user.planTier)];
+}
+
+function quotaDraftFromUser(user: ManagedUser): QuotaDraft {
+  return {
+    dailyConversationLimit: user.dailyConversationLimit == null ? '' : String(user.dailyConversationLimit),
+    fiveHourTokenLimit: user.fiveHourTokenLimit == null ? '' : String(user.fiveHourTokenLimit),
+    weeklyTokenLimit: user.weeklyTokenLimit == null ? '' : String(user.weeklyTokenLimit),
+  };
+}
+
+function quotaDraftValue(value: string) {
+  return value.trim() === '' ? null : Math.max(0, Math.floor(Number(value) || 0));
 }
 
 function formatBytes(value: unknown) {
@@ -464,9 +553,13 @@ function TenantInfo() {
 }
 
 function UserManager() {
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<ManagedUser[]>([]);
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', role: 'member' });
   const [createError, setCreateError] = useState('');
+  const [expandedUser, setExpandedUser] = useState('');
+  const [quotaDrafts, setQuotaDrafts] = useState<Record<string, QuotaDraft>>({});
+  const [savingUser, setSavingUser] = useState('');
+  const [saveError, setSaveError] = useState('');
   useEffect(() => { fetch('/api/users', { headers: getAuthHeaders() }).then(r => r.json()).then(setUsers); }, []);
   const create = async () => {
     setCreateError('');
@@ -480,8 +573,55 @@ function UserManager() {
     setNewUser({ name: '', email: '', password: '', role: 'member' });
   };
   const changeRole = async (email: string, role: string) => {
-    await fetch(`/api/users/${encodeURIComponent(email)}`, { method: 'PATCH', headers: jsonAuthHeaders(), body: JSON.stringify({ role }) });
-    setUsers(users.map((u: any) => u.email === email ? { ...u, role } : u));
+    const r = await fetch(`/api/users/${encodeURIComponent(email)}`, { method: 'PATCH', headers: jsonAuthHeaders(), body: JSON.stringify({ role }) });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok) setUsers(users.map((u) => u.email === email ? body : u));
+  };
+  const changePlan = async (user: ManagedUser, planTier: UserPlanTier) => {
+    setSaveError('');
+    setSavingUser(user.email);
+    const r = await fetch(`/api/users/${encodeURIComponent(user.email)}`, {
+      method: 'PATCH',
+      headers: jsonAuthHeaders(),
+      body: JSON.stringify({ planTier }),
+    });
+    const body = await r.json().catch(() => ({}));
+    setSavingUser('');
+    if (!r.ok) {
+      setSaveError(body.error || '更新套餐失败');
+      return;
+    }
+    setUsers(users.map((u) => u.email === user.email ? body : u));
+  };
+  const openQuotaEditor = (user: ManagedUser) => {
+    const next = expandedUser === user.email ? '' : user.email;
+    setExpandedUser(next);
+    if (next) {
+      setQuotaDrafts(drafts => ({ ...drafts, [user.email]: quotaDraftFromUser(user) }));
+      setSaveError('');
+    }
+  };
+  const saveQuota = async (user: ManagedUser) => {
+    const draft = quotaDrafts[user.email] || quotaDraftFromUser(user);
+    setSaveError('');
+    setSavingUser(user.email);
+    const r = await fetch(`/api/users/${encodeURIComponent(user.email)}`, {
+      method: 'PATCH',
+      headers: jsonAuthHeaders(),
+      body: JSON.stringify({
+        dailyConversationLimit: quotaDraftValue(draft.dailyConversationLimit),
+        fiveHourTokenLimit: quotaDraftValue(draft.fiveHourTokenLimit),
+        weeklyTokenLimit: quotaDraftValue(draft.weeklyTokenLimit),
+      }),
+    });
+    const body = await r.json().catch(() => ({}));
+    setSavingUser('');
+    if (!r.ok) {
+      setSaveError(body.error || '保存额度失败');
+      return;
+    }
+    setUsers(users.map((u) => u.email === user.email ? body : u));
+    setExpandedUser('');
   };
   const remove = async (email: string) => {
     if (!confirm('确定删除用户 ' + email + '？')) return;
@@ -490,7 +630,12 @@ function UserManager() {
   };
   return (
     <div className="card">
-      <div className="card-header">用户管理 ({users.length})</div>
+      <div className="flex-between" style={{ alignItems: 'flex-start', gap: 12, marginBottom: 12 }}>
+        <div>
+          <div className="card-header" style={{ marginBottom: 4 }}>用户管理 ({users.length})</div>
+          <div className="kpi-sub">自注册用户默认加入系统账户，Free 每天 5 次对话；Plus/Pro/Max 按 5 小时和周 token 限制。</div>
+        </div>
+      </div>
       <div className="grid-4 mb-3">
         <input
           value={newUser.name}
@@ -518,22 +663,131 @@ function UserManager() {
         </div>
       </div>
       {createError && <div style={{ color: 'var(--danger)', fontSize: '.82em', marginBottom: 10 }}>{createError}</div>}
+      {saveError && <div style={{ color: 'var(--danger)', fontSize: '.82em', marginBottom: 10 }}>{saveError}</div>}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>用户名</th><th>邮箱</th><th>名称</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>用户</th><th>角色</th><th>套餐</th><th>额度 / 用量</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            {users.map((u: any) => (
-              <tr key={u.email}>
-                <td>{u.username || u.email}</td><td>{u.email}</td><td>{u.name}</td>
-                <td>
-                  <select value={u.role} onChange={e => changeRole(u.email, e.target.value)} style={{ width: 130 }}>
-                    <option value="tenant_admin">管理员</option><option value="team_admin">团队管理</option><option value="member">成员</option>
-                  </select>
-                </td>
-                <td style={{ fontSize: '.8em' }}>{new Date(u.createdAt).toLocaleDateString()}</td>
-                <td><button className="btn btn-sm btn-danger" onClick={() => remove(u.email)}>删除</button></td>
-              </tr>
-            ))}
+            {users.map((u) => {
+              const planTier = normalizePlanTier(u.planTier);
+              const effective = effectiveUserQuota(u);
+              const isExpanded = expandedUser === u.email;
+              const draft = quotaDrafts[u.email] || quotaDraftFromUser(u);
+              const primaryUsage = planTier === 'free' ? u.usage?.dailyConversations : u.usage?.fiveHourTokens;
+              const secondaryUsage = planTier === 'free' ? null : u.usage?.weeklyTokens;
+              return (
+                <Fragment key={u.email}>
+                  <tr key={u.email}>
+                    <td>
+                      <div style={{ fontWeight: 700 }}>{u.username || u.email}</div>
+                      <div className="kpi-sub">{u.name} · {u.email}</div>
+                    </td>
+                    <td>
+                      <select value={u.role} onChange={e => changeRole(u.email, e.target.value)} style={{ width: 130 }}>
+                        <option value="tenant_admin">管理员</option><option value="team_admin">团队管理</option><option value="member">成员</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={planTier}
+                        onChange={e => changePlan(u, e.target.value as UserPlanTier)}
+                        disabled={savingUser === u.email}
+                        style={{ width: 110 }}
+                      >
+                        <option value="free">Free</option>
+                        <option value="plus">Plus</option>
+                        <option value="pro">Pro</option>
+                        <option value="max">Max</option>
+                      </select>
+                      <div className="kpi-sub">{PLAN_LABELS[planTier]}</div>
+                    </td>
+                    <td style={{ minWidth: 260 }}>
+                      <div className="kpi-sub">{planTier === 'free' ? '今日对话' : '5 小时 tokens'}</div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: '.82em', marginTop: 2 }}>
+                        {formatQuotaWindow(primaryUsage, planTier === 'free' ? '次' : 'tokens')}
+                      </div>
+                      {primaryUsage && primaryUsage.limit !== null && (
+                        <div style={{ height: 5, background: 'var(--bg-hover)', borderRadius: 999, overflow: 'hidden', marginTop: 6 }}>
+                          <div style={{ width: `${primaryUsage.percent}%`, height: '100%', background: usageColor(primaryUsage.percent) }} />
+                        </div>
+                      )}
+                      {secondaryUsage && (
+                        <div className="kpi-sub" style={{ marginTop: 6 }}>
+                          本周 {formatQuotaWindow(secondaryUsage, 'tokens')}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ fontSize: '.8em' }}>{new Date(u.createdAt).toLocaleDateString()}</td>
+                    <td>
+                      <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                        <button className="btn btn-sm" onClick={() => openQuotaEditor(u)}>{isExpanded ? '收起' : '额度'}</button>
+                        <button className="btn btn-sm btn-danger" onClick={() => remove(u.email)}>删除</button>
+                      </div>
+                    </td>
+                  </tr>
+                  {isExpanded && (
+                    <tr key={`${u.email}-quota`}>
+                      <td colSpan={6}>
+                        <div className="kpi-card" style={{ display: 'grid', gap: 12 }}>
+                          <div className="grid-3">
+                            <div>
+                              <div className="kpi-label">有效每日对话</div>
+                              <div className="kpi-value" style={{ fontSize: '1em' }}>{formatLimit(effective.dailyConversationLimit, '次')}</div>
+                            </div>
+                            <div>
+                              <div className="kpi-label">有效 5 小时 tokens</div>
+                              <div className="kpi-value" style={{ fontSize: '1em' }}>{formatLimit(effective.fiveHourTokenLimit, 'tokens')}</div>
+                            </div>
+                            <div>
+                              <div className="kpi-label">有效周 tokens</div>
+                              <div className="kpi-value" style={{ fontSize: '1em' }}>{formatLimit(effective.weeklyTokenLimit, 'tokens')}</div>
+                            </div>
+                          </div>
+                          <div className="grid-3">
+                            <div className="form-group" style={{ marginBottom: 0 }}>
+                              <label>自定义每日对话</label>
+                              <input
+                                type="number"
+                                min={0}
+                                placeholder="使用套餐默认"
+                                value={draft.dailyConversationLimit}
+                                onChange={e => setQuotaDrafts({ ...quotaDrafts, [u.email]: { ...draft, dailyConversationLimit: e.target.value } })}
+                              />
+                            </div>
+                            <div className="form-group" style={{ marginBottom: 0 }}>
+                              <label>自定义 5 小时 tokens</label>
+                              <input
+                                type="number"
+                                min={0}
+                                placeholder="使用套餐默认"
+                                value={draft.fiveHourTokenLimit}
+                                onChange={e => setQuotaDrafts({ ...quotaDrafts, [u.email]: { ...draft, fiveHourTokenLimit: e.target.value } })}
+                              />
+                            </div>
+                            <div className="form-group" style={{ marginBottom: 0 }}>
+                              <label>自定义周 tokens</label>
+                              <input
+                                type="number"
+                                min={0}
+                                placeholder="使用套餐默认"
+                                value={draft.weeklyTokenLimit}
+                                onChange={e => setQuotaDrafts({ ...quotaDrafts, [u.email]: { ...draft, weeklyTokenLimit: e.target.value } })}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex-between" style={{ gap: 10, flexWrap: 'wrap' }}>
+                            <div className="kpi-sub">留空表示使用当前套餐默认值；输入 0 会立即限制该窗口。</div>
+                            <button className="btn btn-primary btn-sm" disabled={savingUser === u.email} onClick={() => saveQuota(u)}>
+                              {savingUser === u.email ? '保存中' : '保存额度'}
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
