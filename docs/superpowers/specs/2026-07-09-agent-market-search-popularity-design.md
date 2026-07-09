@@ -25,9 +25,7 @@ popularity: {
 
 `runCount` is the tenant-wide count across all accounts for the template id. `lastRunAt` is the most recent persisted run timestamp for that template in the same tenant.
 
-The first implementation can compute this from existing chat tables at request time. It should count assistant messages with a `run_id`, grouped by `chat_sessions.template_id`, because those represent actual agent run attempts persisted by `/api/chat`. This covers repeated turns inside the same conversation, unlike counting sessions.
-
-If this becomes expensive later, the same response shape can be backed by a denormalized counter table without changing the UI contract.
+The first implementation uses a server-maintained counter table keyed by `(tenant_id, template_id)`. `recordAgentRun` increments the row when an SDK run finishes or fails after starting. The table is backfilled once from existing persisted assistant run messages so existing conversations can seed initial counts, but future counts come from the server-side run path rather than client-editable session payloads.
 
 ## UI
 
