@@ -4873,6 +4873,13 @@ tr:hover td {
   background: color-mix(in srgb, var(--c) 16%, rgba(5, 6, 13, .62));
   box-shadow: 0 0 30px color-mix(in srgb, var(--c) 50%, transparent);
 }
+.fallback-planet.is-disabled {
+  cursor: not-allowed;
+  opacity: .62;
+}
+.fallback-planet.is-disabled .fallback-planet-name {
+  border-bottom-style: dashed;
+}
 .fallback-planet:focus-visible {
   outline: 2px solid var(--c);
   outline-offset: 6px;
@@ -4992,6 +4999,13 @@ tr:hover td {
 .planet-tag.is-hover { z-index: 3; }
 .planet-tag.is-hover .planet-tag-name { text-shadow: 0 0 12px var(--c); }
 .planet-tag.is-hover .planet-tag-desc { display: block; }
+.planet-tag.is-disabled {
+  cursor: not-allowed;
+  opacity: .62;
+}
+.planet-tag.is-disabled .planet-tag-name {
+  border-bottom-style: dashed;
+}
 .universe-hint {
   position: absolute;
   bottom: 12px;

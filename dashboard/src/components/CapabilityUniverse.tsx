@@ -42,6 +42,8 @@ export interface UniverseSection {
   desc: string;
   color: string;
   icon: LineIconName;
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
@@ -64,6 +66,16 @@ const TIERS = [
   { stars: 50_000, far: 3000, dust: 6 },
   { stars: 25_000, far: 2000, dust: 4 },
 ];
+
+type CameraView = {
+  position: [number, number, number];
+  target: [number, number, number];
+};
+
+const DEFAULT_CAMERA_VIEW: CameraView = {
+  position: [0, 320, 560],
+  target: [0, 0, 0],
+};
 
 function pickTier() {
   if (window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 700) return 2;
@@ -134,7 +146,8 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 6000);
-    camera.position.set(0, 320, 560);
+    const initialCameraView = DEFAULT_CAMERA_VIEW;
+    camera.position.set(...initialCameraView.position);
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -152,6 +165,8 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
     controls.autoRotateSpeed = 0.4;
     controls.minPolarAngle = Math.PI * 0.02;
     controls.maxPolarAngle = Math.PI * 0.52;
+    controls.target.set(...initialCameraView.target);
+    controls.update();
 
     const geos: THREE.BufferGeometry[] = [];
     const mats: THREE.Material[] = [];
@@ -377,13 +392,17 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
 
       const label = document.createElement('button');
       label.type = 'button';
-      label.className = 'planet-tag';
+      label.className = `planet-tag${s.disabled ? ' is-disabled' : ''}`;
+      label.disabled = Boolean(s.disabled);
+      if (s.disabledReason) label.title = s.disabledReason;
       label.style.setProperty('--c', s.color);
       label.innerHTML =
         `<span class="planet-tag-code">${ROMAN[i] ?? i + 1}</span>` +
         `<span class="planet-tag-name">${s.title}</span>` +
         `<span class="planet-tag-desc">${s.desc}</span>`;
-      label.addEventListener('click', () => navRef.current(s.path));
+      label.addEventListener('click', () => {
+        if (!s.disabled) navRef.current(s.path);
+      });
       labelLayer.appendChild(label);
 
       moduleStars.push({
@@ -400,7 +419,7 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
       if (hovered) hovered.label.classList.remove('is-hover');
       hovered = p;
       if (hovered) hovered.label.classList.add('is-hover');
-      renderer.domElement.style.cursor = hovered ? 'pointer' : 'grab';
+      renderer.domElement.style.cursor = hovered ? (hovered.section.disabled ? 'not-allowed' : 'pointer') : 'grab';
     };
     const onMove = (e: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -411,7 +430,7 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
       setHover(hitObj ? moduleStars.find((p) => p.hit === hitObj.object) ?? null : null);
     };
     const onClick = () => {
-      if (hovered) navRef.current(hovered.section.path);
+      if (hovered && !hovered.section.disabled) navRef.current(hovered.section.path);
     };
     renderer.domElement.addEventListener('pointermove', onMove);
     renderer.domElement.addEventListener('click', onClick);
@@ -538,21 +557,41 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
           <div className="fallback-spiral fallback-spiral-c" />
           {sections.map((s, i) => {
             const pos = FALLBACK_POSITIONS[i % FALLBACK_POSITIONS.length];
+            const style = {
+              '--x': `${pos.x}%`,
+              '--y': `${pos.y}%`,
+              '--c': s.color,
+            } as CSSProperties;
+            const content = (
+              <>
+                <span className="fallback-planet-dot">
+                  <LineIcon name={s.icon} />
+                </span>
+                <span className="fallback-planet-name">{s.title}</span>
+              </>
+            );
+            if (s.disabled) {
+              return (
+                <span
+                  key={s.path}
+                  role="link"
+                  aria-disabled="true"
+                  title={s.disabledReason}
+                  className="fallback-planet is-disabled"
+                  style={style}
+                >
+                  {content}
+                </span>
+              );
+            }
             return (
               <Link
                 key={s.path}
                 to={s.path}
                 className="fallback-planet"
-                style={{
-                  '--x': `${pos.x}%`,
-                  '--y': `${pos.y}%`,
-                  '--c': s.color,
-                } as CSSProperties}
+                style={style}
               >
-                <span className="fallback-planet-dot">
-                  <LineIcon name={s.icon} />
-                </span>
-                <span className="fallback-planet-name">{s.title}</span>
+                {content}
               </Link>
             );
           })}

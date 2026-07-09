@@ -14,13 +14,14 @@ const SECTIONS = [
       { path: '/visuals', label: '我的可视化', icon: 'chart' },
       { path: '/skills', label: '技能背包', icon: 'spark' },
       { path: '/memories', label: 'Agent 记忆', icon: 'pin' },
-      { path: '/account', label: '账户管理', icon: 'user' },
+      { path: '/', label: '总览', icon: 'overview' },
     ],
   },
   {
     title: '运维',
+    adminOnly: true,
     items: [
-      { path: '/', label: '总览', icon: 'overview' },
+      { path: '/account', label: '账户管理', icon: 'user' },
       { path: '/playground', label: 'Playground', icon: 'play' },
       { path: '/settings', label: '全局设置', icon: 'gear' },
       { path: '/tools', label: '工具背包', icon: 'tools' },
@@ -31,7 +32,7 @@ const SECTIONS = [
       { path: '/crawler', label: '操作后台', icon: 'tools' },
     ],
   },
-] satisfies Array<{ title: string; items: Array<{ path: string; label: string; icon: LineIconName }> }>;
+] satisfies Array<{ title: string; adminOnly?: boolean; items: Array<{ path: string; label: string; icon: LineIconName }> }>;
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -46,6 +47,7 @@ function userInitial(label?: string) {
 
 export default function Sidebar({ collapsed = false, onNavigate, onToggleCollapsed }: SidebarProps) {
   const { user, logout } = useAuth();
+  const isAdmin = user?.role === 'tenant_admin';
   return (
     <nav className="sidebar-body">
       <div className="sidebar-logo-row">
@@ -67,7 +69,7 @@ export default function Sidebar({ collapsed = false, onNavigate, onToggleCollaps
         </button>
       </div>
       <div className="sidebar-scroll">
-        {SECTIONS.map(section => (
+        {SECTIONS.filter(section => !section.adminOnly || isAdmin).map(section => (
           <div className="sidebar-section" key={section.title}>
             <div className="sidebar-section-title">{section.title}</div>
             {section.items.map(item => (
