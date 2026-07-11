@@ -643,9 +643,11 @@ function UserManager() {
           placeholder="名称"
         />
         <input
+          type="email"
           value={newUser.email}
           onChange={e => setNewUser({ ...newUser, email: e.target.value })}
           placeholder="邮箱"
+          title="支持常见公共邮箱和企业邮箱"
         />
         <input
           type="password"

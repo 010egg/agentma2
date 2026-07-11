@@ -1,5 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
   createSdkMcpServer,
   tool,
@@ -70,6 +73,24 @@ const INTERNAL_TOOL_CATALOG: InternalToolCatalogItem[] = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
+    id: 'image.generate',
+    serverName: 'image',
+    toolName: 'generate',
+    displayName: '生成图片',
+    description: '调用本机已登录的 Codex CLI 使用 $imagegen 生成或编辑图片，并把输出保存到当前 run workspace。不会把 Codex 登录凭据暴露给 agent。',
+    category: '模型',
+    inputSchema: {
+      prompt: 'string',
+      outputPath: 'string?',
+      referenceImagePath: 'string?',
+      referenceImagePaths: 'string[]?',
+      size: 'string?',
+      quality: 'string?',
+      background: 'string?',
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  {
     id: 'datasource.list_datasources',
     serverName: 'datasource',
     toolName: 'list_datasources',
@@ -101,6 +122,11 @@ const MODEL_REQUEST_MAX_TOKENS = 8192;
 const MODEL_REQUEST_MAX_OUTPUT_CHARS = 24_000;
 const IMAGE_INSPECT_MAX_FILES = 4;
 const IMAGE_INSPECT_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_GENERATE_TIMEOUT_MS = clampNumber(process.env.AGENTMA_CODEX_IMAGEGEN_TIMEOUT_MS, 10 * 60_000, 30_000, 30 * 60_000);
+const IMAGE_GENERATE_MAX_STDIO_CHARS = 16_000;
+const IMAGE_GENERATE_REFERENCE_MAX_FILES = 4;
+const IMAGE_GENERATE_REFERENCE_MAX_BYTES = 12 * 1024 * 1024;
+const CODEX_IMAGEGEN_SKILL_RELATIVE_DIR = path.join('skills', '.system', 'imagegen');
 
 const IMAGE_MEDIA_TYPES_BY_EXT: Record<string, 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'> = {
   '.jpg': 'image/jpeg',
@@ -138,6 +164,16 @@ type ImageInspectArgs = {
   temperature?: number;
 };
 
+type ImageGenerateArgs = {
+  prompt: string;
+  outputPath?: string;
+  referenceImagePath?: string;
+  referenceImagePaths?: string[];
+  size?: string;
+  quality?: string;
+  background?: string;
+};
+
 type ResolvedWorkspaceImage = ModelRequestImageInput & {
   relativePath: string;
   size: number;
@@ -151,6 +187,20 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
 
 function normalizeBase64ImageData(value: string) {
   return value.trim().replace(/^data:[^;]+;base64,/i, '').trim();
+}
+
+function isPathInside(parent: string, candidate: string) {
+  const resolvedParent = path.resolve(parent);
+  const resolvedCandidate = path.resolve(candidate);
+  return resolvedCandidate === resolvedParent || resolvedCandidate.startsWith(`${resolvedParent}${path.sep}`);
+}
+
+function sanitizeImageBasename(value: string) {
+  return value
+    .replace(/\.[A-Za-z0-9]+$/, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'image';
 }
 
 function buildAnthropicMessagesUrl(baseUrl: string) {
@@ -367,6 +417,398 @@ function readWorkspaceImages(cwd: string, args: ImageInspectArgs): ResolvedWorks
   });
 }
 
+function collectImageGenerateReferencePaths(cwd: string, args: ImageGenerateArgs) {
+  const values: string[] = [];
+  if (typeof args.referenceImagePath === 'string' && args.referenceImagePath.trim()) {
+    values.push(args.referenceImagePath.trim());
+  }
+  if (Array.isArray(args.referenceImagePaths)) {
+    for (const value of args.referenceImagePaths) {
+      if (typeof value === 'string' && value.trim()) values.push(value.trim());
+    }
+  }
+  const deduped = Array.from(new Set(values));
+  if (deduped.length > IMAGE_GENERATE_REFERENCE_MAX_FILES) {
+    throw new Error(`一次最多传 ${IMAGE_GENERATE_REFERENCE_MAX_FILES} 张参考图`);
+  }
+  return deduped.map((rawPath) => {
+    if (/^file:/i.test(rawPath)) throw new Error('参考图请传 workspace 相对路径，不要传 file:// URL');
+    if (rawPath.includes('\0')) throw new Error('参考图路径无效');
+    const resolved = path.resolve(path.isAbsolute(rawPath) ? rawPath : path.join(cwd, rawPath));
+    if (!isPathInside(cwd, resolved)) throw new Error(`参考图不在当前 workspace 内: ${rawPath}`);
+    const ext = path.extname(resolved).toLowerCase();
+    const mediaType = IMAGE_MEDIA_TYPES_BY_EXT[ext];
+    if (!mediaType) throw new Error(`不支持的参考图格式: ${ext || 'unknown'}`);
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile()) throw new Error(`参考图路径不是文件: ${rawPath}`);
+    if (stat.size > IMAGE_GENERATE_REFERENCE_MAX_BYTES) {
+      throw new Error(`参考图过大: ${rawPath} (${stat.size} bytes)，最大 ${IMAGE_GENERATE_REFERENCE_MAX_BYTES} bytes`);
+    }
+    return {
+      resolved,
+      relativePath: path.relative(cwd, resolved).replace(/\\/g, '/'),
+      mediaType,
+      size: stat.size,
+    };
+  });
+}
+
+function resolveImageGenerateOutputPath(cwd: string, rawOutputPath: unknown, prompt: string) {
+  const requested = typeof rawOutputPath === 'string' ? rawOutputPath.trim() : '';
+  const fallbackName = `${sanitizeImageBasename(prompt.slice(0, 48))}-${crypto.randomUUID().slice(0, 8)}.png`;
+  const relative = requested || `generated-images/${fallbackName}`;
+  if (/^file:/i.test(relative)) throw new Error('outputPath 请传 workspace 相对路径，不要传 file:// URL');
+  if (relative.includes('\0')) throw new Error('outputPath 无效');
+  const resolved = path.resolve(path.isAbsolute(relative) ? relative : path.join(cwd, relative));
+  if (!isPathInside(cwd, resolved)) throw new Error(`outputPath 不在当前 workspace 内: ${relative}`);
+  const ext = path.extname(resolved).toLowerCase();
+  if (!['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+    throw new Error('outputPath 只支持 .png、.jpg、.jpeg、.webp');
+  }
+  const relPath = path.relative(cwd, resolved).replace(/\\/g, '/');
+  if (!relPath || relPath.startsWith('..')) throw new Error('outputPath 无效');
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  return { resolved, relativePath: relPath };
+}
+
+function buildCodexImageGeneratePrompt(args: ImageGenerateArgs, outputPath: string, references: ReturnType<typeof collectImageGenerateReferencePaths>) {
+  const prompt = String(args.prompt || '').trim();
+  const options = [
+    args.size ? `size: ${String(args.size).trim()}` : '',
+    args.quality ? `quality: ${String(args.quality).trim()}` : '',
+    args.background ? `background: ${String(args.background).trim()}` : '',
+  ].filter(Boolean);
+  const referenceList = references.length
+    ? references.map((image, index) => `${index + 1}. ${image.relativePath} (${image.mediaType}, ${image.size} bytes)`).join('\n')
+    : '无';
+  return [
+    '$imagegen',
+    '',
+    '请生成或编辑一张图片，并把最终图片文件保存到下面这个相对路径：',
+    outputPath,
+    '',
+    '用户需求：',
+    prompt,
+    '',
+    options.length ? `偏好参数：${options.join('；')}` : '',
+    '',
+    '参考图片：',
+    referenceList,
+    '',
+    '要求：',
+    '- 必须生成实际图片文件，不要只描述图片。',
+    `- 必须保存为 ${outputPath}，路径相对于当前工作目录。`,
+    '- 不要读取任何 AGENTS.md、SKILL.md、全局规则、登录凭据、token、auth.json 或 ~/.codex 内容。',
+    '- 不要调用 shell 命令来查看本机配置；只做图片生成和必要的目标文件保存。',
+    '- 最后一条回复只用一句话说明已生成的相对路径。',
+  ].filter((line) => line !== '').join('\n');
+}
+
+function truncateMiddle(text: string, maxChars: number) {
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars * 0.65);
+  const tail = maxChars - head - 32;
+  return `${text.slice(0, head)}\n...[truncated]...\n${text.slice(Math.max(0, text.length - tail))}`;
+}
+
+function resolveCodexHome() {
+  const configured = String(process.env.CODEX_HOME || '').trim();
+  if (configured) return configured;
+  return path.join(os.homedir(), '.codex');
+}
+
+function tomlString(value: string) {
+  return JSON.stringify(value);
+}
+
+const CODEX_CONFIG_TOP_LEVEL_KEYS = new Set([
+  'model',
+  'model_provider',
+  'service_tier',
+  'preferred_auth_method',
+  'cli_auth_credentials_store',
+  'disable_response_storage',
+  'model_verbosity',
+  'model_reasoning_summary',
+  'model_supports_reasoning_summaries',
+]);
+
+const CODEX_CONFIG_FORCED_KEYS = new Set([
+  'approval_policy',
+  'sandbox_mode',
+  'project_doc_max_bytes',
+  'project_doc_fallback_filenames',
+  'model_reasoning_effort',
+  'developer_instructions',
+]);
+
+function parseTomlScalarString(value: string) {
+  const trimmed = value.trim();
+  const doubleQuoted = trimmed.match(/^"((?:\\.|[^"\\])*)"/);
+  if (doubleQuoted) {
+    try {
+      return JSON.parse(`"${doubleQuoted[1]}"`);
+    } catch {
+      return '';
+    }
+  }
+  const singleQuoted = trimmed.match(/^'([^']*)'/);
+  if (singleQuoted) return singleQuoted[1];
+  return trimmed.split(/[\s#]/, 1)[0] || '';
+}
+
+function extractCodexTopLevelConfig(configText: string) {
+  const lines: string[] = [];
+  let modelProvider = '';
+  for (const line of configText.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) break;
+    const match = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$/);
+    if (!match) continue;
+    const key = match[1];
+    if (!CODEX_CONFIG_TOP_LEVEL_KEYS.has(key) || CODEX_CONFIG_FORCED_KEYS.has(key)) continue;
+    lines.push(line.trimEnd());
+    if (key === 'model_provider') modelProvider = parseTomlScalarString(match[2]);
+  }
+  return { lines, modelProvider };
+}
+
+function isSelectedModelProviderSection(header: string, provider: string) {
+  const trimmed = header.trim();
+  return (
+    trimmed === `model_providers.${provider}`
+    || trimmed === `model_providers.${tomlString(provider)}`
+  );
+}
+
+function extractCodexProviderSection(configText: string, provider: string) {
+  if (!provider) return '';
+  const lines = configText.split(/\r?\n/);
+  const selected: string[] = [];
+  let collecting = false;
+  for (const line of lines) {
+    const section = line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/);
+    if (section) {
+      if (collecting) break;
+      collecting = isSelectedModelProviderSection(section[1], provider);
+    }
+    if (collecting) selected.push(line.trimEnd());
+  }
+  return selected.join('\n').trim();
+}
+
+function buildIsolatedCodexConfig(sourceCodexHome: string) {
+  const sourceConfigPath = path.join(sourceCodexHome, 'config.toml');
+  let sourceConfig = '';
+  try {
+    sourceConfig = fs.readFileSync(sourceConfigPath, 'utf8');
+  } catch {}
+
+  const { lines, modelProvider } = extractCodexTopLevelConfig(sourceConfig);
+  const providerSection = extractCodexProviderSection(sourceConfig, modelProvider);
+  const parts = [
+    '# Generated by AgentMa for an isolated image-generation worker.',
+    lines.join('\n').trim(),
+    [
+      'approval_policy = "never"',
+      'sandbox_mode = "workspace-write"',
+      'project_doc_max_bytes = 0',
+      'project_doc_fallback_filenames = []',
+      'model_reasoning_effort = "low"',
+    ].join('\n'),
+    providerSection,
+  ].filter(Boolean);
+  return `${parts.join('\n\n')}\n`;
+}
+
+function copyCodexAuthIfPresent(sourceCodexHome: string, targetCodexHome: string) {
+  const sourceAuthPath = path.join(sourceCodexHome, 'auth.json');
+  const targetAuthPath = path.join(targetCodexHome, 'auth.json');
+  try {
+    const stat = fs.statSync(sourceAuthPath);
+    if (!stat.isFile()) return false;
+    fs.copyFileSync(sourceAuthPath, targetAuthPath);
+    fs.chmodSync(targetAuthPath, 0o600);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function copyCodexImagegenSkillIfPresent(sourceCodexHome: string, targetCodexHome: string) {
+  const sourceSkillDir = path.join(sourceCodexHome, CODEX_IMAGEGEN_SKILL_RELATIVE_DIR);
+  const targetSkillDir = path.join(targetCodexHome, CODEX_IMAGEGEN_SKILL_RELATIVE_DIR);
+  try {
+    const stat = fs.statSync(path.join(sourceSkillDir, 'SKILL.md'));
+    if (!stat.isFile()) return false;
+    fs.mkdirSync(path.dirname(targetSkillDir), { recursive: true });
+    fs.cpSync(sourceSkillDir, targetSkillDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeCodexWorkerHome(workerCodexHome: string) {
+  if (!workerCodexHome) return;
+  try {
+    fs.rmSync(workerCodexHome, { recursive: true, force: true });
+  } catch {}
+}
+
+function buildCodexChildBaseEnv() {
+  const keep = [
+    'PATH', 'USER', 'LOGNAME', 'TMPDIR', 'TEMP', 'TMP',
+    'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TERM',
+    'CODEX_ACCESS_TOKEN', 'CODEX_API_KEY',
+    'CODEX_CA_CERTIFICATE', 'SSL_CERT_FILE',
+    'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'https_proxy', 'http_proxy', 'all_proxy', 'no_proxy',
+  ];
+  const env: Record<string, string> = {};
+  for (const key of keep) {
+    const value = process.env[key];
+    if (value != null) env[key] = String(value);
+  }
+  return env;
+}
+
+function prepareCodexWorkerEnvironment() {
+  const sourceCodexHome = resolveCodexHome();
+  const workerCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agentma-codex-imagegen-'));
+  fs.chmodSync(workerCodexHome, 0o700);
+
+  const workerHome = path.join(workerCodexHome, 'home');
+  fs.mkdirSync(workerHome, { recursive: true, mode: 0o700 });
+  fs.chmodSync(workerHome, 0o700);
+
+  const configPath = path.join(workerCodexHome, 'config.toml');
+  fs.writeFileSync(configPath, buildIsolatedCodexConfig(sourceCodexHome), { mode: 0o600 });
+
+  copyCodexAuthIfPresent(sourceCodexHome, workerCodexHome);
+  copyCodexImagegenSkillIfPresent(sourceCodexHome, workerCodexHome);
+
+  const env = buildCodexChildBaseEnv();
+  env.HOME = workerHome;
+  env.CODEX_HOME = workerCodexHome;
+  return { env, workerCodexHome };
+}
+
+function runCodexImageGeneration(cwd: string, args: ImageGenerateArgs, output: { resolved: string; relativePath: string }, references: ReturnType<typeof collectImageGenerateReferencePaths>) {
+  const codexBin = String(process.env.AGENTMA_CODEX_BIN || 'codex').trim() || 'codex';
+  const transcriptPath = path.join(cwd, `.agentma-codex-imagegen-${crypto.randomUUID().slice(0, 8)}.txt`);
+  const promptText = buildCodexImageGeneratePrompt(args, output.relativePath, references);
+  const worker = prepareCodexWorkerEnvironment();
+  const cliArgs = [
+    'exec',
+    '-c',
+    'approval_policy="never"',
+    '-c',
+    'project_doc_max_bytes=0',
+    '-c',
+    'project_doc_fallback_filenames=[]',
+    '-c',
+    'model_reasoning_effort="low"',
+    '-c',
+    `developer_instructions=${tomlString('You are an isolated image-generation worker for AgentMa. Do not load or follow local AGENTS files, global skills, personal workflows, or project instructions. Use only the current user request and optional reference images. Do not inspect authentication files or local configuration.')}`,
+    '--ignore-rules',
+    '--ephemeral',
+    '--skip-git-repo-check',
+    '--sandbox',
+    'workspace-write',
+    '--color',
+    'never',
+    '--cd',
+    cwd,
+    '--output-last-message',
+    transcriptPath,
+    ...references.flatMap((image) => ['--image', image.resolved]),
+    promptText,
+  ];
+
+  return new Promise<{ exitCode: number; stdout: string; stderr: string; finalMessage: string }>((resolve, reject) => {
+    const child = spawn(codexBin, cliArgs, {
+      cwd,
+      env: worker.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!settled) child.kill('SIGKILL');
+      }, 2500).unref();
+    }, IMAGE_GENERATE_TIMEOUT_MS);
+
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      removeCodexWorkerHome(worker.workerCodexHome);
+      reject(error);
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      let finalMessage = '';
+      try {
+        finalMessage = fs.readFileSync(transcriptPath, 'utf8').trim();
+      } catch {}
+      removeCodexWorkerHome(worker.workerCodexHome);
+      if (signal) {
+        reject(new Error(`codex image generation stopped by ${signal}`));
+        return;
+      }
+      resolve({
+        exitCode: code ?? 1,
+        stdout: truncateMiddle(stdout.trim(), IMAGE_GENERATE_MAX_STDIO_CHARS),
+        stderr: truncateMiddle(stderr.trim(), IMAGE_GENERATE_MAX_STDIO_CHARS),
+        finalMessage: truncateMiddle(finalMessage, IMAGE_GENERATE_MAX_STDIO_CHARS),
+      });
+    });
+  });
+}
+
+async function generateWorkspaceImage(cwd: string, args: ImageGenerateArgs) {
+  const prompt = String(args.prompt || '').trim();
+  if (!prompt) throw new Error('prompt 不能为空');
+  const output = resolveImageGenerateOutputPath(cwd, args.outputPath, prompt);
+  const references = collectImageGenerateReferencePaths(cwd, args);
+  const beforeMtime = fs.existsSync(output.resolved) ? fs.statSync(output.resolved).mtimeMs : 0;
+  const result = await runCodexImageGeneration(cwd, args, output, references);
+  if (result.exitCode !== 0) {
+    throw new Error(`Codex 图片生成失败(exit ${result.exitCode}): ${(result.stderr || result.stdout || result.finalMessage || '无输出').slice(0, 2000)}`);
+  }
+  if (!fs.existsSync(output.resolved)) {
+    throw new Error(`Codex 未生成目标图片: ${output.relativePath}`);
+  }
+  const stat = fs.statSync(output.resolved);
+  if (!stat.isFile()) throw new Error(`生成目标不是文件: ${output.relativePath}`);
+  if (stat.size <= 0) throw new Error(`生成图片为空: ${output.relativePath}`);
+  if (beforeMtime && stat.mtimeMs <= beforeMtime) {
+    throw new Error(`目标图片未更新: ${output.relativePath}`);
+  }
+  return {
+    path: output.relativePath,
+    size: stat.size,
+    updatedAt: stat.mtimeMs,
+    references: references.map((image) => ({
+      path: image.relativePath,
+      mediaType: image.mediaType,
+      size: image.size,
+    })),
+    codex: {
+      exitCode: result.exitCode,
+      finalMessage: result.finalMessage,
+    },
+  };
+}
+
 async function inspectWorkspaceImages(tenantId: string, cwd: string, args: ImageInspectArgs, defaultModel: string) {
   const images = readWorkspaceImages(cwd, args);
   const imageList = images.map((image, index) => (
@@ -437,44 +879,87 @@ export function buildModelRequestMcp(tenantId: string) {
   });
 }
 
-export function buildImageInspectMcp(tenantId: string, cwd: string, preferredDefaultModel = '') {
+function buildImageInspectTool(tenantId: string, cwd: string, preferredDefaultModel = '') {
   const { modelSchema, modelHint } = buildModelSchema(tenantId);
   const defaultModel = defaultModelFromInternalToolSetting(tenantId, 'image.inspect')
     || preferredDefaultModel.trim();
   const defaultModelHint = defaultModel ? `默认模型: ${defaultModel}。` : '尚未配置默认模型；调用时必须传 model。';
+  return tool(
+    'inspect',
+    `读取当前 run workspace 的 attachments 图片并调用已配置视觉模型识别，返回文本结果。请传 imagePath 或 imagePaths，路径应类似 attachments/xxx.png；不要传 file:// 或 base64。model 可选；未传时使用工具页配置的默认模型。${defaultModelHint}${modelHint}`,
+    {
+      imagePath: z.string().optional().describe('单张图片路径，例如 attachments/image.png'),
+      imagePaths: z.array(z.string()).optional().describe(`多张图片路径，一次最多 ${IMAGE_INSPECT_MAX_FILES} 张`),
+      path: z.string().optional().describe('imagePath 的兼容别名'),
+      paths: z.array(z.string()).optional().describe('imagePaths 的兼容别名'),
+      prompt: z.string().optional().describe('希望视觉模型重点识别的内容'),
+      model: modelSchema,
+      maxTokens: z.number().optional(),
+      temperature: z.number().optional(),
+    },
+    async (args: ImageInspectArgs) => {
+      try {
+        const result = await inspectWorkspaceImages(tenantId, cwd, args, defaultModel);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(result).slice(0, MODEL_REQUEST_MAX_OUTPUT_CHARS),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `err: ${(error as Error).message}` }], isError: true };
+      }
+    },
+  );
+}
+
+function buildImageGenerateTool(cwd: string) {
+  return tool(
+    'generate',
+    `调用本机已登录的 Codex CLI 使用 $imagegen 生成或编辑图片，并保存到当前 run workspace。prompt 必填；outputPath 可选，默认写到 generated-images/*.png；referenceImagePath/referenceImagePaths 可传 workspace 内图片作为参考。不要传 API Key、Base URL 或本机凭据路径。`,
+    {
+      prompt: z.string().describe('图片生成或编辑需求'),
+      outputPath: z.string().optional().describe('workspace 相对输出路径，例如 generated-images/hero.png'),
+      referenceImagePath: z.string().optional().describe('可选单张参考图 workspace 相对路径'),
+      referenceImagePaths: z.array(z.string()).optional().describe(`可选多张参考图 workspace 相对路径，一次最多 ${IMAGE_GENERATE_REFERENCE_MAX_FILES} 张`),
+      size: z.string().optional().describe('可选尺寸或比例偏好，例如 1024x1024、16:9、横版海报'),
+      quality: z.string().optional().describe('可选质量偏好，例如 low、medium、high、auto'),
+      background: z.string().optional().describe('可选背景偏好，例如 transparent、white、scene background'),
+    },
+    async (args: ImageGenerateArgs) => {
+      try {
+        const result = await generateWorkspaceImage(cwd, args);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify(result).slice(0, MODEL_REQUEST_MAX_OUTPUT_CHARS),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `err: ${(error as Error).message}` }], isError: true };
+      }
+    },
+  );
+}
+
+export function buildImageMcp(
+  tenantId: string,
+  cwd: string,
+  opts: { inspect?: boolean; generate?: boolean; preferredDefaultModel?: string } = {},
+) {
+  const sdkTools: any[] = [];
+  if (opts.inspect) sdkTools.push(buildImageInspectTool(tenantId, cwd, opts.preferredDefaultModel || ''));
+  if (opts.generate) sdkTools.push(buildImageGenerateTool(cwd));
+  if (!sdkTools.length) return null;
   return createSdkMcpServer({
     name: 'image',
     version: '1.0.0',
-    tools: [
-      tool(
-        'inspect',
-        `读取当前 run workspace 的 attachments 图片并调用已配置视觉模型识别，返回文本结果。请传 imagePath 或 imagePaths，路径应类似 attachments/xxx.png；不要传 file:// 或 base64。model 可选；未传时使用工具页配置的默认模型。${defaultModelHint}${modelHint}`,
-        {
-          imagePath: z.string().optional().describe('单张图片路径，例如 attachments/image.png'),
-          imagePaths: z.array(z.string()).optional().describe(`多张图片路径，一次最多 ${IMAGE_INSPECT_MAX_FILES} 张`),
-          path: z.string().optional().describe('imagePath 的兼容别名'),
-          paths: z.array(z.string()).optional().describe('imagePaths 的兼容别名'),
-          prompt: z.string().optional().describe('希望视觉模型重点识别的内容'),
-          model: modelSchema,
-          maxTokens: z.number().optional(),
-          temperature: z.number().optional(),
-        },
-        async (args: ImageInspectArgs) => {
-          try {
-            const result = await inspectWorkspaceImages(tenantId, cwd, args, defaultModel);
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify(result).slice(0, MODEL_REQUEST_MAX_OUTPUT_CHARS),
-              }],
-            };
-          } catch (error) {
-            return { content: [{ type: 'text', text: `err: ${(error as Error).message}` }], isError: true };
-          }
-        },
-      ),
-    ],
+    tools: sdkTools,
   });
+}
+
+export function buildImageInspectMcp(tenantId: string, cwd: string, preferredDefaultModel = '') {
+  return buildImageMcp(tenantId, cwd, { inspect: true, preferredDefaultModel });
 }
 
 // in-process 跑在服务进程里(受信代码)，agent(沙箱内)只能拿到查询结果，

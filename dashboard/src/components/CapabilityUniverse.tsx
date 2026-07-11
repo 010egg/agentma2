@@ -72,6 +72,15 @@ type CameraView = {
   target: [number, number, number];
 };
 
+type UniverseCameraConfig = CameraView & {
+  compact: boolean;
+  fov: number;
+  minDistance: number;
+  maxDistance: number;
+  minPolarAngle: number;
+  maxPolarAngle: number;
+};
+
 const DESKTOP_DEFAULT_ELEVATION = THREE.MathUtils.degToRad(16);
 const DESKTOP_DEFAULT_DISTANCE = Math.hypot(320, 560);
 
@@ -83,6 +92,50 @@ const DEFAULT_CAMERA_VIEW: CameraView = {
   ],
   target: [0, 0, 0],
 };
+
+const DESKTOP_CAMERA_CONFIG: UniverseCameraConfig = {
+  ...DEFAULT_CAMERA_VIEW,
+  compact: false,
+  fov: 55,
+  minDistance: 300,
+  maxDistance: 1700,
+  minPolarAngle: Math.PI * 0.02,
+  maxPolarAngle: Math.PI * 0.52,
+};
+
+const MOBILE_CAMERA_POLAR = Math.PI * 0.045;
+const MOBILE_FIT_RADIUS = GALAXY.radius + 70;
+
+function mobileCameraPosition(distance: number): [number, number, number] {
+  return [
+    0,
+    Math.cos(MOBILE_CAMERA_POLAR) * distance,
+    Math.sin(MOBILE_CAMERA_POLAR) * distance,
+  ];
+}
+
+function getUniverseCameraConfig(width: number, height: number): UniverseCameraConfig {
+  const compact = window.matchMedia('(pointer: coarse)').matches || width < 760;
+  if (!compact) return DESKTOP_CAMERA_CONFIG;
+
+  const aspect = Math.max(width / Math.max(height, 1), 0.34);
+  const fov = 70;
+  const fitAxis = Math.min(aspect, 1);
+  const halfFovTangent = Math.tan(THREE.MathUtils.degToRad(fov) / 2);
+  const fitDistance = (MOBILE_FIT_RADIUS / (halfFovTangent * fitAxis)) * 1.12;
+  const distance = THREE.MathUtils.clamp(fitDistance, 1250, 2600);
+
+  return {
+    compact: true,
+    fov,
+    position: mobileCameraPosition(distance),
+    target: [0, 0, 0],
+    minDistance: distance * 0.56,
+    maxDistance: distance * 1.65,
+    minPolarAngle: Math.PI * 0.012,
+    maxPolarAngle: Math.PI * 0.42,
+  };
+}
 
 function pickTier() {
   if (window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 700) return 2;
@@ -155,9 +208,9 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
     let height = mount.clientHeight || 560;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 6000);
-    const initialCameraView = DEFAULT_CAMERA_VIEW;
-    camera.position.set(...initialCameraView.position);
+    let cameraConfig = getUniverseCameraConfig(width, height);
+    const camera = new THREE.PerspectiveCamera(cameraConfig.fov, width / height, 0.1, 6000);
+    camera.position.set(...cameraConfig.position);
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -169,18 +222,22 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.enablePan = false;
-    controls.minDistance = 300;
-    controls.maxDistance = 1700;
+    controls.minDistance = cameraConfig.minDistance;
+    controls.maxDistance = cameraConfig.maxDistance;
     controls.autoRotate = !reduce;
     controls.autoRotateSpeed = 0.4;
-    controls.minPolarAngle = Math.PI * 0.02;
-    controls.maxPolarAngle = Math.PI * 0.52;
-    controls.target.set(...initialCameraView.target);
+    controls.minPolarAngle = cameraConfig.minPolarAngle;
+    controls.maxPolarAngle = cameraConfig.maxPolarAngle;
+    controls.target.set(...cameraConfig.target);
     controls.update();
     let referenceDistance = camera.position.distanceTo(controls.target);
     let previousZoom = -1;
     let previousHorizontalAngle = -1;
     let previousVerticalAngle = Number.NaN;
+    let userAdjustedCamera = false;
+    controls.addEventListener('start', () => {
+      userAdjustedCamera = true;
+    });
 
     const geos: THREE.BufferGeometry[] = [];
     const mats: THREE.Material[] = [];
@@ -532,7 +589,21 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
     const resize = () => {
       width = mount.clientWidth || 800;
       height = mount.clientHeight || 560;
+      const nextCameraConfig = getUniverseCameraConfig(width, height);
+      const shouldResetCamera = !userAdjustedCamera || nextCameraConfig.compact !== cameraConfig.compact;
+      cameraConfig = nextCameraConfig;
+      camera.fov = cameraConfig.fov;
       camera.aspect = width / height;
+      controls.minDistance = cameraConfig.minDistance;
+      controls.maxDistance = cameraConfig.maxDistance;
+      controls.minPolarAngle = cameraConfig.minPolarAngle;
+      controls.maxPolarAngle = cameraConfig.maxPolarAngle;
+      if (shouldResetCamera) {
+        camera.position.set(...cameraConfig.position);
+        controls.target.set(...cameraConfig.target);
+        controls.update();
+        referenceDistance = camera.position.distanceTo(controls.target);
+      }
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
     };

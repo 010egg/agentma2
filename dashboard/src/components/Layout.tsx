@@ -52,6 +52,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       return next;
     });
   };
+
   useEffect(() => {
     const handleOpenMobileNav = () => setSidebarOpen(true);
     window.addEventListener('agentma:open-mobile-nav', handleOpenMobileNav);

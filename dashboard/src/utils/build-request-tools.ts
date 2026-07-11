@@ -45,6 +45,15 @@ export const BUILT_IN_REQUEST_TOOL_SCHEMAS: Record<string, Record<string, unknow
     maxTokens: 'number?',
     temperature: 'number?',
   },
+  'image.generate': {
+    prompt: 'string',
+    outputPath: 'string?',
+    referenceImagePath: 'string?',
+    referenceImagePaths: 'string[]?',
+    size: 'string?',
+    quality: 'string?',
+    background: 'string?',
+  },
 };
 
 export function buildRequestTools(

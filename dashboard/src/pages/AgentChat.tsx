@@ -327,6 +327,17 @@ export default function AgentChat() {
     return refreshed;
   }, [sessionId, template]);
 
+  const refreshCurrentTemplate = useCallback(() => {
+    const tenantId = user?.tenantId;
+    if (!tenantId || !id) return;
+    void bootstrapAgentTemplates(tenantId, user.role === 'tenant_admin')
+      .then((templateList) => {
+        const updatedTemplate = templateList.find((item) => item.id === id);
+        if (updatedTemplate) setTemplate(updatedTemplate);
+      })
+      .catch((error) => console.error('failed to refresh agent template', error));
+  }, [id, user?.tenantId, user?.role]);
+
   useEffect(() => {
     if (!sessionId || !pendingRunMessage?.id || !pendingRunMessage.runId) {
       observingRunIdRef.current = '';
@@ -768,6 +779,7 @@ export default function AgentChat() {
                 setRunStats(finalRunStats || null);
               }
               await persistFinalMessage(finalContent || (cachedErrorMessage ? `错误: ${cachedErrorMessage}` : ''), finalOutcome, data.sdkSessionId, data.sdkCwd, finalDetail, finalRunStats);
+              refreshCurrentTemplate();
             } else if (data.type === 'run_outcome') {
               receivedOutcome = normalizeRunOutcome(data.outcome, receivedOutcome || 'provider_error');
               outcomeDetail = typeof data.subtype === 'string'
@@ -827,7 +839,7 @@ export default function AgentChat() {
       }
     }
     finishRun();
-  }, [input, attachments, isStreaming, isAttachmentUploading, template, nextSuggestion, messages, persistSession, selectedModel, sessionMeta, sessionId, id, visualPreprocessEnabled, visualPreprocessModel]);
+  }, [input, attachments, isStreaming, isAttachmentUploading, template, nextSuggestion, messages, persistSession, selectedModel, sessionMeta, sessionId, id, visualPreprocessEnabled, visualPreprocessModel, refreshCurrentTemplate]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();

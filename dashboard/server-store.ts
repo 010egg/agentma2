@@ -503,6 +503,93 @@ function normalizeEmail(email: string) {
   return String(email || '').trim().toLowerCase();
 }
 
+const POPULAR_PUBLIC_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'qq.com',
+  'foxmail.com',
+  '163.com',
+  '126.com',
+  'yeah.net',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'msn.com',
+  'icloud.com',
+  'me.com',
+  'mac.com',
+  'yahoo.com',
+  'yahoo.com.cn',
+  'proton.me',
+  'protonmail.com',
+  'aol.com',
+  'mail.com',
+  'sina.com',
+  'sina.cn',
+  'sohu.com',
+  'aliyun.com',
+  '139.com',
+  '189.cn',
+  'wo.cn',
+]);
+
+const BLOCKED_EMAIL_DOMAINS = new Set([
+  'localhost',
+  'localdomain',
+  'example.com',
+  'example.org',
+  'example.net',
+]);
+
+const BLOCKED_EMAIL_TLDS = new Set(['local', 'localhost', 'test', 'invalid', 'example']);
+const EMAIL_LOCAL_PART_RE = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i;
+const EMAIL_DOMAIN_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const EMAIL_TLD_RE = /^(?:[a-z]{2,24}|xn--[a-z0-9-]{2,59})$/;
+
+function isIpv4Address(value: string) {
+  const parts = value.split('.');
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const num = Number(part);
+    return num >= 0 && num <= 255 && String(num) === part;
+  });
+}
+
+function registrationEmailError(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || normalizedEmail.length > 254 || /\s/.test(normalizedEmail)) {
+    return '邮箱格式无效';
+  }
+  const at = normalizedEmail.indexOf('@');
+  if (at <= 0 || at !== normalizedEmail.lastIndexOf('@')) {
+    return '邮箱格式无效';
+  }
+  const localPart = normalizedEmail.slice(0, at);
+  const domain = normalizedEmail.slice(at + 1);
+  if (!localPart || localPart.length > 64 || !EMAIL_LOCAL_PART_RE.test(localPart)
+    || localPart.startsWith('.') || localPart.endsWith('.') || localPart.includes('..')) {
+    return '邮箱格式无效';
+  }
+  if (!domain || domain.length > 253 || domain.startsWith('.') || domain.endsWith('.') || domain.includes('..')) {
+    return '邮箱格式无效';
+  }
+  if (domain.startsWith('[') || domain.endsWith(']') || isIpv4Address(domain) || BLOCKED_EMAIL_DOMAINS.has(domain)) {
+    return '请使用常见公共邮箱或企业邮箱';
+  }
+
+  const labels = domain.split('.');
+  const tld = labels[labels.length - 1] || '';
+  if (labels.length < 2 || BLOCKED_EMAIL_TLDS.has(tld) || !EMAIL_TLD_RE.test(tld)) {
+    return '请使用常见公共邮箱或企业邮箱';
+  }
+  if (!labels.every(label => EMAIL_DOMAIN_LABEL_RE.test(label))) {
+    return '邮箱域名格式无效';
+  }
+
+  if (POPULAR_PUBLIC_EMAIL_DOMAINS.has(domain)) return null;
+  return null;
+}
+
 function uniqueUsernameForEmail(email: string, existing: Set<string>) {
   const base = baseUsernameFromEmail(email);
   let candidate = base;
@@ -1862,9 +1949,8 @@ export function authenticateToken(token: string | undefined | null): AuthIdentit
 export function registerUser(name: string, email: string, password: string) {
   const normalizedEmail = normalizeEmail(email);
   const normalizedName = String(name || '').trim() || normalizedEmail.split('@')[0] || '成员';
-  if (!normalizedEmail || !normalizedEmail.includes('@')) {
-    return { ok: false as const, status: 400, error: '邮箱格式无效' };
-  }
+  const emailError = registrationEmailError(normalizedEmail);
+  if (emailError) return { ok: false as const, status: 400, error: emailError };
   if (!password || password.length < 6) {
     return { ok: false as const, status: 400, error: '密码至少 6 位' };
   }
@@ -1946,11 +2032,10 @@ export function registerUser(name: string, email: string, password: string) {
 }
 
 export function createTenantUser(tenantId: string, name: string, email: string, password: string, role: Role = 'member') {
-  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const normalizedEmail = normalizeEmail(email);
   const normalizedName = String(name || '').trim() || normalizedEmail.split('@')[0] || '成员';
-  if (!normalizedEmail || !normalizedEmail.includes('@')) {
-    return { ok: false as const, status: 400, error: '邮箱格式无效' };
-  }
+  const emailError = registrationEmailError(normalizedEmail);
+  if (emailError) return { ok: false as const, status: 400, error: emailError };
   if (!password || password.length < 6) {
     return { ok: false as const, status: 400, error: '密码至少 6 位' };
   }

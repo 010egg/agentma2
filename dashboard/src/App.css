@@ -2345,7 +2345,16 @@ label {
 .agents-list-toolbar {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
+}
+
+.agents-market-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 128px;
+  gap: 8px;
+  flex: 1 1 360px;
+  min-width: min(100%, 320px);
 }
 
 .agents-page-shell {
@@ -2895,7 +2904,20 @@ label {
   }
 
   .composer-model-picker {
-    display: none;
+    display: inline-flex;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: min(240px, calc(100vw - 112px));
+  }
+
+  .composer-model-picker .chat-model-picker {
+    width: 100%;
+  }
+
+  .composer-model-picker .chat-model-picker select {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
   }
 
   .agent-chat-model-picker {
@@ -2928,6 +2950,7 @@ label {
   .chat-messages { padding: 12px; }
   .chat-msg { max-width: 92%; font-size: .94em; padding: 9px 12px; }
   .chat-input-area { padding: 8px 10px; }
+  .chat-input-area.chat-input-area-stacked { gap: 6px; }
   .chat-input-area textarea { font-size: 16px; }
 
   /* Agents: 表单堆叠 */
@@ -2938,6 +2961,10 @@ label {
   }
   .agent-card-actions {
     gap: 6px;
+  }
+  .agents-market-controls {
+    grid-template-columns: 1fr;
+    flex-basis: 100%;
   }
   .agent-card-chat-btn {
     min-height: 32px;
@@ -4962,6 +4989,30 @@ tr:hover td {
     font-size: 16px;
     text-overflow: ellipsis;
   }
+
+  .planet-tag {
+    transform-origin: center bottom;
+  }
+
+  .planet-tag::after {
+    height: 18px;
+  }
+
+  .planet-tag-code {
+    font-size: 7.5px;
+    letter-spacing: .16em;
+  }
+
+  .planet-tag-name {
+    max-width: 96px;
+    overflow: hidden;
+    font-size: 15px;
+    text-overflow: ellipsis;
+  }
+
+  .planet-tag-desc {
+    display: none !important;
+  }
 }
 
 /* 功能宇宙 */
@@ -5049,6 +5100,327 @@ tr:hover td {
   font-size: 12px;
   color: var(--ink-muted);
   pointer-events: none;
+}
+
+/* Agents market refinement: quieter directory rhythm, clearer card hierarchy. */
+.agents-page-header {
+  max-width: 780px;
+  margin-bottom: 18px;
+}
+
+.agents-page-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 28px;
+  line-height: 1.05;
+}
+
+.agents-page-header p {
+  max-width: 640px;
+  margin-top: 7px;
+  line-height: 1.55;
+}
+
+.agents-page-title-icon {
+  width: 38px;
+  height: 38px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 38px;
+  border: 1.5px solid var(--ink);
+  border-radius: 10px;
+  background: var(--bg-card);
+  box-shadow: 2px 2px 0 0 var(--ink);
+  color: var(--accent);
+}
+
+.agents-page-title-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.agents-list-toolbar {
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.agents-list-toolbar .btn svg,
+.agents-page-shell .agent-card-actions .btn svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.agents-market-sections {
+  gap: 26px;
+}
+
+.agents-market-section {
+  gap: 12px;
+}
+
+.agents-section-head {
+  padding: 0 4px;
+}
+
+.agents-section-head .card-header {
+  margin-bottom: 5px !important;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.agents-section-head .tool-card-desc {
+  max-width: 760px;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.agents-list-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 310px), 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.agents-page-shell .agent-card {
+  position: relative;
+  height: 100%;
+  min-height: 166px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 14px 14px 13px;
+  border-color: rgba(42, 20, 16, 0.24);
+  border-radius: 9px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-card) 94%, #fff 6%), var(--bg-card)),
+    var(--bg-card);
+  box-shadow: 2px 3px 0 0 var(--ink);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.agents-page-shell .agent-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, var(--ink), var(--orange));
+  opacity: 0.72;
+}
+
+.agents-page-shell .agent-card:hover {
+  border-color: var(--ink);
+  box-shadow: 4px 5px 0 0 var(--ink);
+  transform: translate(-1px, -2px);
+}
+
+.agents-page-shell .agent-card.selected {
+  border-color: var(--ink);
+  background: var(--paper);
+  box-shadow: 3px 3px 0 0 var(--orange);
+}
+
+.agents-page-shell .agent-card-readonly {
+  cursor: default;
+}
+
+.agents-page-shell .agent-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.agent-card-title-block {
+  min-width: 0;
+}
+
+.agent-card-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-card-mark {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 24px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--accent);
+}
+
+.agent-card-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+.agents-page-shell .agent-card-name {
+  min-width: 0;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.agents-page-shell .agent-card-owner {
+  margin: 4px 0 0 32px;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-card-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.agents-page-shell .agent-card-date {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.agents-page-shell .agent-card-desc {
+  display: -webkit-box;
+  min-height: 0;
+  margin-top: 10px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--ink-secondary);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.agents-page-shell .agent-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.agents-page-shell .agent-card-tags .badge {
+  max-width: 100%;
+}
+
+.agents-page-shell .agent-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.agents-page-shell .agent-card-actions .btn {
+  min-height: 32px;
+  padding: 5px 9px;
+  border-color: rgba(42, 20, 16, 0.2);
+  background: color-mix(in srgb, var(--bg-card) 86%, var(--paper));
+  box-shadow: none;
+  font-size: 10.5px;
+  line-height: 1;
+}
+
+.agents-page-shell .agent-card-actions .btn:hover {
+  border-color: var(--ink);
+  background: var(--paper);
+  box-shadow: 2px 2px 0 0 var(--ink);
+  transform: translate(-1px, -1px);
+}
+
+.agents-page-shell .agent-card-actions .btn-primary {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.agents-page-shell .agent-card-actions .agent-card-chat-btn {
+  margin-left: auto;
+}
+
+@media (max-width: 760px) {
+  .agents-page-header {
+    margin-bottom: 16px;
+  }
+
+  .agents-page-title {
+    align-items: flex-start;
+    font-size: 25px;
+  }
+
+  .agents-page-title-icon {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+  }
+
+  .agents-list-toolbar {
+    gap: 9px;
+    margin-bottom: 22px;
+  }
+
+  .agents-list-toolbar .btn {
+    min-height: 42px;
+  }
+
+  .agents-market-sections {
+    gap: 24px;
+  }
+
+  .agents-list-grid {
+    gap: 14px;
+  }
+
+  .agents-page-shell .agent-card {
+    min-height: 0;
+    padding: 14px 12px 12px;
+  }
+
+  .agents-page-shell .agent-card-head {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .agent-card-meta {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .agents-page-shell .agent-card-desc {
+    min-height: 0;
+    font-size: 14px;
+  }
+
+  .agents-page-shell .agent-card-actions .btn {
+    min-height: 38px;
+  }
+
+  .agents-page-shell .agent-card-actions .agent-card-chat-btn {
+    flex: 1 1 100%;
+    justify-content: center;
+    margin-left: 0;
+  }
 }
 
 @media (max-width: 768px) {

@@ -19,7 +19,7 @@ import { evaluateHookRules, evaluatePermissionRules, listDatasources, listHookRu
 import type { DatasourceRow, HookRuleEvent } from './server-store.ts';
 import { DATASOURCE_QUERY_MAX_ROWS } from './server-datasource.ts';
 import { buildMemoryMcp, buildMemorySystemPrompt, readMemoryContext } from './server-memory.ts';
-import { buildDatasourceMcp, buildImageInspectMcp, buildModelRequestMcp, listInternalTools } from './server-internal-tools.ts';
+import { buildDatasourceMcp, buildImageMcp, buildModelRequestMcp, listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, type RunOutcome } from './src/simulator/run-state.ts';
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
@@ -434,7 +434,7 @@ export type AgentEvent =
   | { type: 'task_updated'; taskId: string; status?: string; description?: string; error?: string; backgrounded?: boolean; sdkSessionId?: string }
   | { type: 'task_notification'; taskId: string; toolUseId?: string; status: string; summary?: string; outputFile?: string; usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }; sdkSessionId?: string }
   | { type: 'context_compaction'; subtype: 'compact_boundary'; message: string; sdkSessionId?: string; timestamp: number }
-  | { type: 'run_log'; level: 'info' | 'warn'; scope: 'skill' | 'tool_search'; message: string }
+  | { type: 'run_log'; level: 'info' | 'warn'; scope: 'skill' | 'tool_search' | 'image' | 'visual'; message: string }
   | { type: 'run_outcome'; outcome: RunOutcome; subtype?: string; message?: string }
   | { type: 'result'; subtype: string; text: string; usage: { input_tokens: number; output_tokens: number }; duration_ms: number; cost_usd: number; model: string; sdkSessionId?: string; sdkCwd?: string; structuredOutput?: unknown }
   | { type: 'error'; message: string };
@@ -485,6 +485,8 @@ export interface RunAgentOptions {
   cwd?: string;
   /** Persistent template seed copied into a fresh run cwd before SDK query starts. */
   seedDir?: string;
+  /** Agent template id used for tenant-wide popularity accounting. */
+  templateId?: string;
   resumeSdkSessionId?: string;
   tenantId: string;
   sub: string;
@@ -493,6 +495,20 @@ export interface RunAgentOptions {
   requestPermission: RequestPermissionFn;
   requestUserQuestion: RequestUserQuestionFn;
 }
+
+export type AgentRunResult = {
+  subtype: string;
+  outcome: RunOutcome;
+  text: string;
+  inputTokens: number;
+  outputTokens: number;
+  durationMs: number;
+  costUsd: number;
+  model: string;
+  sdkSessionId?: string;
+  sdkCwd?: string;
+  structuredOutput?: unknown;
+};
 
 const RUN_CWD_PREFIX = 'agentma-run-';
 const RUN_CWD_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1139,7 +1155,7 @@ function appendUploadedImagePaths(prompt: string, files: MaterializedPromptImage
   ].join('\n');
 }
 
-export async function runAgent(opts: RunAgentOptions): Promise<void> {
+export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const cwd = opts.cwd || path.join('/tmp', `agentma-run-${opts.tenantId}-${Date.now()}`);
   fs.mkdirSync(cwd, { recursive: true });
   cleanupExpiredRunCwds(cwd);
@@ -1227,12 +1243,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
   const hasPromptImages = Boolean(opts.promptImages?.length);
   const hasAttachmentImages = workspaceHasAttachmentImages(cwd);
   const imageInspectConfigured = Array.from(configuredToolNames).some((name) => name === 'image.inspect' || name === internalToolRuntimeNames.get('image.inspect'));
+  const imageGenerateConfigured = Array.from(configuredToolNames).some((name) => name === 'image.generate' || name === internalToolRuntimeNames.get('image.generate'));
   const templateHasExplicitToolList = Boolean(opts.tools?.length);
   const shouldAutoExposeImageInspect = (hasPromptImages || hasAttachmentImages) && !templateHasExplicitToolList;
-  const imageInspectMcp = (imageInspectConfigured || shouldAutoExposeImageInspect)
-    ? buildImageInspectMcp(opts.tenantId, cwd, opts.imageInspectModel || opts.visualPreprocess?.model || '')
+  const imageInspectAvailable = imageInspectConfigured || shouldAutoExposeImageInspect;
+  const imageMcp = (imageInspectAvailable || imageGenerateConfigured)
+    ? buildImageMcp(opts.tenantId, cwd, {
+      inspect: imageInspectAvailable,
+      generate: imageGenerateConfigured,
+      preferredDefaultModel: opts.imageInspectModel || opts.visualPreprocess?.model || '',
+    })
     : null;
-  const uploadedImageGuardEnabled = hasPromptImages || hasAttachmentImages || Boolean(imageInspectMcp);
+  const uploadedImageGuardEnabled = hasPromptImages || hasAttachmentImages || imageInspectAvailable;
   // 跨会话记忆(按 tenant/sub 隔离):always-on,注入已存记忆 + 暴露 remember 工具。
   const memoryEnabled = Boolean(opts.tenantId && opts.sub);
   const memoryAuth = { tenantId: opts.tenantId, sub: opts.sub };
@@ -1245,10 +1267,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
   const modelRequestSystemPrompt = modelRequestMcp
     ? '已启用内部工具 model.request。需要请求其他模型、视觉模型或专用小模型时，可以调用该工具；model 必须选择账户已配置且已启用的模型名，不要尝试传入 API Key 或 Base URL。若用户上传图片已保存为 attachments 路径，不要用 Read/Bash 读出 base64 再传给 model.request；应改用 image.inspect。'
     : '';
-  const imageInspectSystemPrompt = imageInspectMcp
+  const imageInspectSystemPrompt = imageInspectAvailable
     ? '已启用内部工具 image.inspect。用户上传的图片会保存到 workspace 的 attachments/ 下；需要读取图片像素或 OCR 时，调用 mcp__image__inspect，传 imagePath 或 imagePaths。不要使用 file://、WebFetch 或把图片转成大段 base64。model 必须选择账户已配置且已启用的模型名；如果工具页已配置默认模型，可以省略 model。'
     : '';
-  const effectiveSystemPrompt = [opts.systemPrompt, buildRunIsolationSystemPrompt(), knowledgeSystemPrompt, datasourceSystemPrompt, skillsSystemPrompt, askUserQuestionSystemPrompt, toolSearchSystemPrompt, modelRequestSystemPrompt, imageInspectSystemPrompt, memorySystemPrompt].filter((part) => part && part.trim()).join('\n\n');
+  const imageGenerateSystemPrompt = imageGenerateConfigured
+    ? '已启用内部工具 image.generate。需要生成或编辑图片时，调用 mcp__image__generate；prompt 必填，outputPath 应使用 workspace 相对路径，例如 generated-images/hero.png。该工具由服务进程调用本机已登录的 Codex CLI 和 $imagegen，不要尝试读取、传递或暴露 Codex 登录凭据。'
+    : '';
+  const effectiveSystemPrompt = [opts.systemPrompt, buildRunIsolationSystemPrompt(), knowledgeSystemPrompt, datasourceSystemPrompt, skillsSystemPrompt, askUserQuestionSystemPrompt, toolSearchSystemPrompt, modelRequestSystemPrompt, imageInspectSystemPrompt, imageGenerateSystemPrompt, memorySystemPrompt].filter((part) => part && part.trim()).join('\n\n');
   const nativeMcpServerNames = new Set((opts.mcpServers || []).map((name) => name.trim()).filter((name) => /^[A-Za-z0-9._-]{1,128}$/.test(name)));
   let customNames = new Set<string>();
   if (customMcp) {
@@ -1303,9 +1328,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
     templateToolNames.add('mcp__datasource__list_datasources');
     templateToolNames.add('mcp__datasource__query_datasource');
   }
-  if (imageInspectMcp) {
+  if (imageInspectAvailable) {
     // image.inspect 显式启用，或开放模板上传图片时自动挂载。
     templateToolNames.add('mcp__image__inspect');
+  }
+  if (imageGenerateConfigured) {
+    templateToolNames.add('mcp__image__generate');
   }
   if (nativeMcpServerNames.size) {
     for (const serverName of nativeMcpServerNames) {
@@ -1362,10 +1390,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
     const uploadedImageReadPath = uploadedImageGuardEnabled ? uploadedAttachmentImageReadPath(toolName, input, cwd) : '';
     if (uploadedImageReadPath) {
       const message = /^file:/i.test(uploadedImageReadPath)
-        ? imageInspectMcp
+        ? imageInspectAvailable
           ? '不要使用 file:// 读取本地图片；请改用 mcp__image__inspect，并传 attachments/... 相对路径。'
           : '不要使用 file:// 读取本地图片；当前 Agent 模板未启用 image.inspect，请开启视觉预处理，或在 Agent 模板里勾选 image.inspect。'
-        : imageInspectMcp
+        : imageInspectAvailable
           ? `不要用 Read 读取上传图片 ${uploadedImageReadPath}；Read 会把图片转成大段 base64 并可能截断。请调用 mcp__image__inspect，输入 {"imagePath":"${uploadedImageReadPath}"}。`
           : `不要用 Read 读取上传图片 ${uploadedImageReadPath}；Read 会把图片转成大段 base64 并可能截断。当前 Agent 模板未启用 image.inspect，请开启视觉预处理，或在 Agent 模板里勾选 image.inspect。`;
       opts.emit({
@@ -1378,7 +1406,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
     }
     const uploadedImageBashPath = uploadedImageGuardEnabled ? uploadedAttachmentImageBashPath(toolName, input, cwd) : '';
     if (uploadedImageBashPath) {
-      const message = imageInspectMcp
+      const message = imageInspectAvailable
         ? `不要用 Bash/Python/base64 读取或压缩上传图片 ${uploadedImageBashPath} 后再发给模型；这会经过工具输出并可能截断。请调用 mcp__image__inspect，输入 {"imagePath":"${uploadedImageBashPath}"}。`
         : `不要用 Bash/Python/base64 读取或压缩上传图片 ${uploadedImageBashPath} 后再发给模型；这会经过工具输出并可能截断。当前 Agent 模板未启用 image.inspect，请开启视觉预处理，或在 Agent 模板里勾选 image.inspect。`;
       opts.emit({
@@ -1488,7 +1516,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
         runPrompt = appendVisionPreprocessResult(runPrompt, opts.visualPreprocess.model, imageFiles, visualText);
         runPromptImages = [];
       } else {
-        runPrompt = appendUploadedImagePaths(runPrompt, imageFiles, Boolean(imageInspectMcp));
+        runPrompt = appendUploadedImagePaths(runPrompt, imageFiles, imageInspectAvailable);
       }
     }
 
@@ -1531,12 +1559,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
         env,
         settings: { showThinkingSummaries: true },
         ...(hooks ? { hooks, includeHookEvents: true } : {}),
-        ...(customMcp || datasourceMcp || modelRequestMcp || imageInspectMcp || memoryMcp ? {
+        ...(customMcp || datasourceMcp || modelRequestMcp || imageMcp || memoryMcp ? {
           mcpServers: {
             ...(customMcp ? { custom: customMcp } : {}),
             ...(datasourceMcp ? { datasource: datasourceMcp } : {}),
             ...(modelRequestMcp ? { model: modelRequestMcp } : {}),
-            ...(imageInspectMcp ? { image: imageInspectMcp } : {}),
+            ...(imageMcp ? { image: imageMcp } : {}),
             ...(memoryMcp ? { memory: memoryMcp } : {}),
           },
         } : {}),
@@ -1556,7 +1584,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
             const thinkingText = getThinkingText(b);
             if (!emittedThinking) emitThinking(thinkingText);
           }
-          else if (b.type === 'tool_use') opts.emit({ type: 'delta', text: `\n🔧 ${b.name}(${JSON.stringify(b.input).slice(0, 150)})\n` });
+          else if (b.type === 'tool_use') {
+            if (b.name === 'mcp__image__generate') {
+              opts.emit({ type: 'run_log', level: 'info', scope: 'image', message: '图片生成已开始，可能需要几十秒到数分钟。' });
+            }
+            opts.emit({ type: 'delta', text: `\n🔧 ${b.name}(${JSON.stringify(b.input).slice(0, 150)})\n` });
+          }
         }
       } else if (m.type === 'user') {
         for (const b of m.message?.content || []) {
@@ -1640,7 +1673,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
 
   const durationMs = Date.now() - startTime;
   const costUsd = estimateCostUsd(opts.model, inTok, outTok);
-  try { recordAgentRun(opts.tenantId, { sub: opts.sub, model: opts.model, durationMs, inputTokens: inTok, outputTokens: outTok, costUsd, status: outcome }); } catch {}
+  try { recordAgentRun(opts.tenantId, { sub: opts.sub, model: opts.model, durationMs, inputTokens: inTok, outputTokens: outTok, costUsd, status: outcome, templateId: opts.templateId }); } catch {}
   opts.emit({
     type: 'result',
     subtype: status,
@@ -1653,4 +1686,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<void> {
     sdkCwd: cwd,
     ...(structuredOutput !== undefined ? { structuredOutput } : {}),
   });
+  return {
+    subtype: status,
+    outcome,
+    text: finalText,
+    inputTokens: inTok,
+    outputTokens: outTok,
+    durationMs,
+    costUsd,
+    model: opts.model,
+    sdkSessionId: sdkSessionId || undefined,
+    sdkCwd: cwd,
+    ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+  };
 }

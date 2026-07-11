@@ -61,6 +61,15 @@ function normalizeSubagents(value: unknown): Record<string, AgentDefinition> {
   );
 }
 
+function normalizePopularity(value: unknown): AgentTemplate['popularity'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { runCount: 0, lastRunAt: null };
+  const raw = value as Record<string, unknown>;
+  return {
+    runCount: Math.max(0, Math.floor(Number(raw.runCount) || 0)),
+    lastRunAt: Number(raw.lastRunAt) || null,
+  };
+}
+
 function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
@@ -101,6 +110,7 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
       ? raw.visualPreprocessModel.trim()
       : undefined,
     seedDir: typeof raw.seedDir === 'string' && raw.seedDir.trim() ? raw.seedDir : undefined,
+    popularity: normalizePopularity(raw.popularity),
     createdBy: typeof raw.createdBy === 'string' && raw.createdBy.trim() ? raw.createdBy : null,
     publishedAt: Number(raw.publishedAt) || null,
     archivedAt: Number(raw.archivedAt) || null,
@@ -133,6 +143,9 @@ async function readJson<T>(res: Response): Promise<T> {
 function writeTenantCache(tenantId: string, templates: AgentTemplate[]) {
   try {
     localStorage.setItem(getCacheKey(tenantId), JSON.stringify(templates));
+    window.dispatchEvent(new CustomEvent('agentma:agent-templates-updated', {
+      detail: { tenantId, templates },
+    }));
   } catch {}
 }
 

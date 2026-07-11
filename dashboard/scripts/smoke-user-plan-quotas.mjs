@@ -124,7 +124,7 @@ async function main() {
     managed = await startManagedServer();
     const stamp = Date.now();
     const admin = await register('admin', 'admin@agentma.com');
-    const member = await register('Member Smoke', `quota-member-${stamp}@example.test`);
+    const member = await register('Member Smoke', `quota-member-${stamp}@gmail.com`);
 
     const users = await fetchJson(`${baseUrl}/api/users`, {
       headers: { Authorization: `Bearer ${admin.token}` },
