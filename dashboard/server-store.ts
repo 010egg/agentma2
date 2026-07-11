@@ -6,6 +6,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import bcrypt from 'bcryptjs';
 import { getCredentialCipher } from './server-credentials.ts';
+import { initializeA2ATaskStore } from './server-a2a-store.ts';
 import {
   agentRunOutcomeIsFailure,
   normalizeChatMessageStatus,
@@ -477,6 +478,7 @@ db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 
 initSchema();
+initializeA2ATaskStore(db);
 migrateLegacyJson();
 backfillUserIdentityColumns();
 migrateOwnerSubsToUserIds();
