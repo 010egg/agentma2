@@ -4562,6 +4562,35 @@ export function listAgentTemplates(tenantId: string, viewerSub?: string | null, 
     .filter((t): t is Record<string, unknown> => Boolean(t && canSeeAgentTemplate(t, viewerSub, viewerRole)));
 }
 
+function isPublishedA2AAgentTemplate(template: Record<string, unknown>) {
+  return template.a2aPublished === true
+    && !Number(template.archivedAt)
+    && !isDeletedAgentTemplate(template);
+}
+
+export function getPublishedA2AAgentTemplate(tenantId: string, templateId: string) {
+  const normalizedId = String(templateId || '').trim();
+  if (!normalizedId) return null;
+  const row = db.prepare(`
+    SELECT data_json FROM agent_templates WHERE tenant_id = ? AND id = ?
+  `).get(tenantId, normalizedId) as { data_json: string } | undefined;
+  const template = row ? parseAgentTemplateJson(row.data_json) : null;
+  return template && isPublishedA2AAgentTemplate(template) ? template : null;
+}
+
+export function findUniquePublishedA2AAgentTemplate(templateId: string) {
+  const normalizedId = String(templateId || '').trim();
+  if (!normalizedId) return null;
+  const matches = (db.prepare(`
+    SELECT data_json FROM agent_templates WHERE id = ?
+  `).all(normalizedId) as Array<{ data_json: string }>)
+    .map((row) => parseAgentTemplateJson(row.data_json))
+    .filter((template): template is Record<string, unknown> => Boolean(
+      template && isPublishedA2AAgentTemplate(template),
+    ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function listAgentTemplatePopularity(tenantId: string): Record<string, AgentTemplatePopularity> {
   const rows = db.prepare(`
     SELECT template_id,

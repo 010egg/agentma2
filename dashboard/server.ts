@@ -118,10 +118,12 @@ import {
 } from './server-datasource.ts';
 import { listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, outcomeToMessageStatus, type RunOutcome } from './src/simulator/run-state.ts';
+import { mountA2ARoutes } from './server-a2a.ts';
 
 const execFileAsync = promisify(execFile);
 const app = express();
 app.use(cors({ origin: true }));
+mountA2ARoutes(app);
 app.use(express.json({ limit: '50mb' }));
 app.use((error: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (error?.type === 'entity.too.large') {

@@ -63,6 +63,7 @@ export type A2ATaskListOptions = {
 export type A2ATaskListResult = {
   tasks: A2ATaskRecord[];
   nextCursor: string | null;
+  totalSize: number;
 };
 
 export type A2AStoreErrorCode = 'not_found' | 'invalid_input' | 'invalid_transition' | 'terminal' | 'invalid_cursor';
@@ -769,6 +770,10 @@ function createStore(database: DatabaseSync) {
       filters.push('updated_at >= ?');
       params.push(updatedAfter);
     }
+    const totalRow = database.prepare(`
+      SELECT COUNT(*) AS total_size FROM a2a_tasks
+      WHERE ${filters.join(' AND ')}
+    `).get(...params) as { total_size: number };
     if (options.cursor) {
       const cursor = decodeCursor(options.cursor);
       filters.push('(updated_at < ? OR (updated_at = ? AND id < ?))');
@@ -787,6 +792,7 @@ function createStore(database: DatabaseSync) {
     return {
       tasks,
       nextCursor: hasMore && tasks.length ? encodeCursor(tasks[tasks.length - 1]) : null,
+      totalSize: Number(totalRow.total_size) || 0,
     };
   };
 
