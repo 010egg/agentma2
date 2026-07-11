@@ -4769,6 +4769,41 @@ tr:hover td {
   text-shadow: 0 0 16px rgba(255, 224, 160, .3);
 }
 
+.universe-view-status {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid rgba(247, 243, 231, .16);
+  border-radius: 8px;
+  background: rgba(5, 6, 13, .3);
+  color: rgba(247, 243, 231, .54);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.universe-view-status span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.universe-view-status output {
+  min-width: 34px;
+  color: #f7f3e7;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .universe-stage-fallback {
   isolation: isolate;
   background:

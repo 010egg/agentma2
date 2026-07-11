@@ -72,8 +72,15 @@ type CameraView = {
   target: [number, number, number];
 };
 
+const DESKTOP_DEFAULT_ELEVATION = THREE.MathUtils.degToRad(16);
+const DESKTOP_DEFAULT_DISTANCE = Math.hypot(320, 560);
+
 const DEFAULT_CAMERA_VIEW: CameraView = {
-  position: [0, 320, 560],
+  position: [
+    0,
+    Math.sin(DESKTOP_DEFAULT_ELEVATION) * DESKTOP_DEFAULT_DISTANCE,
+    Math.cos(DESKTOP_DEFAULT_ELEVATION) * DESKTOP_DEFAULT_DISTANCE,
+  ],
   target: [0, 0, 0],
 };
 
@@ -130,6 +137,9 @@ function hasWebGL() {
 
 export default function CapabilityUniverse({ sections }: { sections: UniverseSection[] }) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const zoomValueRef = useRef<HTMLOutputElement>(null);
+  const horizontalAngleValueRef = useRef<HTMLOutputElement>(null);
+  const verticalAngleValueRef = useRef<HTMLOutputElement>(null);
   const navigate = useNavigate();
   const navRef = useRef(navigate);
   navRef.current = navigate;
@@ -167,6 +177,10 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
     controls.maxPolarAngle = Math.PI * 0.52;
     controls.target.set(...initialCameraView.target);
     controls.update();
+    let referenceDistance = camera.position.distanceTo(controls.target);
+    let previousZoom = -1;
+    let previousHorizontalAngle = -1;
+    let previousVerticalAngle = Number.NaN;
 
     const geos: THREE.BufferGeometry[] = [];
     const mats: THREE.Material[] = [];
@@ -495,6 +509,22 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
       }
 
       controls.update();
+
+      const zoom = Math.round((referenceDistance / camera.position.distanceTo(controls.target)) * 100);
+      const horizontalAngle = Math.round(THREE.MathUtils.radToDeg(controls.getAzimuthalAngle()) + 360) % 360;
+      const verticalAngle = Math.round(90 - THREE.MathUtils.radToDeg(controls.getPolarAngle()));
+      if (zoom !== previousZoom && zoomValueRef.current) {
+        zoomValueRef.current.value = `${zoom}%`;
+        previousZoom = zoom;
+      }
+      if (horizontalAngle !== previousHorizontalAngle && horizontalAngleValueRef.current) {
+        horizontalAngleValueRef.current.value = `${horizontalAngle}\u00b0`;
+        previousHorizontalAngle = horizontalAngle;
+      }
+      if (verticalAngle !== previousVerticalAngle && verticalAngleValueRef.current) {
+        verticalAngleValueRef.current.value = `${verticalAngle > 0 ? '+' : ''}${verticalAngle}\u00b0`;
+        previousVerticalAngle = verticalAngle;
+      }
       renderer.render(scene, camera);
     };
     animate();
@@ -595,6 +625,11 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
               </Link>
             );
           })}
+          <div className="universe-view-status" aria-label="缩放比例 100%，水平角度 0 度，俯仰角度 0 度">
+            <span>缩放 <output>100%</output></span>
+            <span>水平 <output>0\u00b0</output></span>
+            <span>俯仰 <output>0\u00b0</output></span>
+          </div>
           <div className="universe-hint">点击星标进入</div>
         </div>
       </div>
@@ -604,6 +639,11 @@ export default function CapabilityUniverse({ sections }: { sections: UniverseSec
   return (
     <div className="universe-wrap">
       <div ref={mountRef} className="universe-stage" />
+      <div className="universe-view-status" aria-label="当前宇宙视图状态">
+        <span>缩放 <output ref={zoomValueRef}>100%</output></span>
+        <span>水平 <output ref={horizontalAngleValueRef}>0\u00b0</output></span>
+        <span>俯仰 <output ref={verticalAngleValueRef}>0\u00b0</output></span>
+      </div>
       <div className="universe-hint">拖动旋转 · 滚轮缩放 · 点击行星进入</div>
     </div>
   );
