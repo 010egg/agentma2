@@ -393,6 +393,12 @@ export interface StreamEvent {
 }
 
 // --- Agent 模板 ---
+export interface A2ARemoteAgentConfig {
+  name: string;
+  agentCardUrl: string;
+  credentialRef?: string;
+}
+
 export interface AgentTemplate {
   id: string;
   name: string;
@@ -419,6 +425,9 @@ export interface AgentTemplate {
   // 视觉预处理：开启后图片先由独立视觉模型识别，再把结果交给 agent。
   visualPreprocessDefault?: boolean;
   visualPreprocessModel?: string;
+  // A2A 1.0：独立于租户内 Agent 市场发布状态。
+  a2aPublished: boolean;
+  a2aRemoteAgents: A2ARemoteAgentConfig[];
   // 导入本地 Claude Code 项目时生成的模板级 seed 仓路径。
   seedDir?: string;
   // Agent 市场热度：同一租户内跨账户累计使用次数。

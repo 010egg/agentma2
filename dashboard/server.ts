@@ -107,7 +107,7 @@ import {
 } from './server-agent.ts';
 import type { AgentEvent } from './server-agent.ts';
 import { listMemories, readMemory, writeMemory, deleteMemory, consolidateMemories } from './server-memory.ts';
-import type { Role, ChatHistoryVisual } from './server-store.ts';
+import type { AuthIdentity, Role, ChatHistoryVisual } from './server-store.ts';
 import {
   importDatasourceUpload,
   runDatasourceQuery,
@@ -1532,6 +1532,18 @@ function normalizeAgentTemplateForApi(value: unknown): Record<string, unknown> {
   template.visualPreprocessModel = typeof template.visualPreprocessModel === 'string' && template.visualPreprocessModel.trim()
     ? template.visualPreprocessModel.trim()
     : undefined;
+  template.a2aPublished = template.a2aPublished === true;
+  template.a2aRemoteAgents = Array.isArray(template.a2aRemoteAgents)
+    ? template.a2aRemoteAgents.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const raw = item as Record<string, unknown>;
+      const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+      const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
+      if (!name || !agentCardUrl) return [];
+      const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
+      return [{ name, agentCardUrl, ...(credentialRef ? { credentialRef } : {}) }];
+    })
+    : [];
 
   if (template.subagents && typeof template.subagents === 'object' && !Array.isArray(template.subagents)) {
     const normalizedSubagents = Object.entries(template.subagents as Record<string, unknown>).flatMap(([name, agent]) => {
@@ -2771,6 +2783,17 @@ app.delete('/api/api-keys/:id', authMiddleware, requireAdmin, (req: any, res) =>
 app.get('/api/a2a/credentials', authMiddleware, requireAdmin, (req: any, res) => {
   if (req.auth.authType === 'api_key') { res.status(403).json({ error: 'API Key 无法管理远程凭据，请使用密码登录' }); return; }
   res.json(listA2ACredentials(req.auth.tenantId));
+});
+
+app.get('/api/a2a/credential-options', authMiddleware, (req, res) => {
+  const auth = (req as express.Request & { auth: AuthIdentity }).auth;
+  if (auth.authType === 'api_key') { res.status(403).json({ error: 'API Key 无法浏览远程凭据，请使用密码登录' }); return; }
+  res.json(listA2ACredentials(auth.tenantId).map(({ id, name, createdAt, rotatedAt }) => ({
+    id,
+    name,
+    createdAt,
+    rotatedAt,
+  })));
 });
 
 app.post('/api/a2a/credentials', authMiddleware, requireAdmin, (req: any, res) => {
@@ -4769,19 +4792,24 @@ app.get('/api/agents/:id/claude-md', authMiddleware, (req: any, res) => {
 });
 
 app.put('/api/agents', authMiddleware, (req: any, res) => {
-  const list = Array.isArray(req.body) ? req.body.map(normalizeAgentTemplateForApi) : [];
-  const actor = agentTemplateActor(req.auth);
-  const previous = listAgentTemplates(req.auth.tenantId).map(normalizeAgentTemplateForApi);
-  const saved = replaceAgentTemplates(req.auth.tenantId, list, actor, req.auth.role);
-  const allAfterSave = listAgentTemplates(req.auth.tenantId).map(normalizeAgentTemplateForApi);
-  const savedIds = new Set(allAfterSave.map((template) => String((template as Record<string, unknown>).id || '')));
-  for (const template of previous) {
-    const templateId = String(template.id || '');
-    if (!templateId || savedIds.has(templateId) || !canManageAgentTemplate(req.auth, template) || typeof template.seedDir !== 'string') continue;
-    fs.rmSync(agentSeedDir(req.auth.tenantId, templateId), { recursive: true, force: true });
+  try {
+    const list = Array.isArray(req.body) ? req.body : [];
+    const actor = agentTemplateActor(req.auth);
+    const previous = listAgentTemplates(req.auth.tenantId).map(normalizeAgentTemplateForApi);
+    const saved = replaceAgentTemplates(req.auth.tenantId, list, actor, req.auth.role);
+    const allAfterSave = listAgentTemplates(req.auth.tenantId).map(normalizeAgentTemplateForApi);
+    const savedIds = new Set(allAfterSave.map((template) => String((template as Record<string, unknown>).id || '')));
+    for (const template of previous) {
+      const templateId = String(template.id || '');
+      if (!templateId || savedIds.has(templateId) || !canManageAgentTemplate(req.auth, template) || typeof template.seedDir !== 'string') continue;
+      fs.rmSync(agentSeedDir(req.auth.tenantId, templateId), { recursive: true, force: true });
+    }
+    audit(req.auth.tenantId, 'replace_agents', req.auth.sub, 'user', `agents:${req.auth.tenantId}`, { count: saved.length });
+    res.json(listVisibleAgentTemplates(req.auth));
+  } catch (error) {
+    const err = error as Error & { status?: number };
+    res.status(err.status || 400).json({ error: err.message || '保存 Agent 失败' });
   }
-  audit(req.auth.tenantId, 'replace_agents', req.auth.sub, 'user', `agents:${req.auth.tenantId}`, { count: saved.length });
-  res.json(listVisibleAgentTemplates(req.auth));
 });
 
 // ═══ Visual Artifacts Routes ═══

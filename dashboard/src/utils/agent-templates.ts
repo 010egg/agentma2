@@ -1,4 +1,4 @@
-import type { AgentDefinition, AgentTemplate, EffortLevel, PermissionMode, ProviderConfig } from '../simulator/types';
+import type { A2ARemoteAgentConfig, AgentDefinition, AgentTemplate, EffortLevel, PermissionMode, ProviderConfig } from '../simulator/types';
 import { getAuthHeaders } from './client-runtime';
 
 const LEGACY_CACHE_KEY = 'agentma_templates';
@@ -70,6 +70,19 @@ function normalizePopularity(value: unknown): AgentTemplate['popularity'] {
   };
 }
 
+function normalizeA2ARemoteAgents(value: unknown): A2ARemoteAgentConfig[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const raw = item as Record<string, unknown>;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
+    if (!name || !agentCardUrl) return [];
+    const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
+    return [{ name, agentCardUrl, credentialRef: credentialRef || undefined }];
+  });
+}
+
 function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
@@ -109,6 +122,8 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
     visualPreprocessModel: typeof raw.visualPreprocessModel === 'string' && raw.visualPreprocessModel.trim()
       ? raw.visualPreprocessModel.trim()
       : undefined,
+    a2aPublished: raw.a2aPublished === true,
+    a2aRemoteAgents: normalizeA2ARemoteAgents(raw.a2aRemoteAgents),
     seedDir: typeof raw.seedDir === 'string' && raw.seedDir.trim() ? raw.seedDir : undefined,
     popularity: normalizePopularity(raw.popularity),
     createdBy: typeof raw.createdBy === 'string' && raw.createdBy.trim() ? raw.createdBy : null,
@@ -258,6 +273,8 @@ function createVizAgentTemplate(model: string): AgentTemplate {
     maxTurns: 50,
     permissionMode: 'default',
     knowledgeSourceIds: [],
+    a2aPublished: false,
+    a2aRemoteAgents: [],
     createdAt: now,
     updatedAt: now,
   };

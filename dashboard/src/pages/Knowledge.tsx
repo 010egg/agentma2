@@ -541,6 +541,8 @@ export default function Knowledge() {
       permissionMode: 'default',
       useKnowledge: true,
       knowledgeSourceIds: [],
+      a2aPublished: false,
+      a2aRemoteAgents: [],
       createdAt: now,
       updatedAt: now,
     };

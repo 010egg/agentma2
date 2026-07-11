@@ -8,6 +8,7 @@ import { getAuthHeaders } from '../utils/client-runtime';
 import { listProviderModels, resolveProviderForModel } from '../utils/providers';
 import ModelPicker from '../components/common/ModelPicker';
 import LineIcon from '../components/LineIcon';
+import A2AConfigEditor from '../components/A2AConfigEditor';
 
 type KnowledgeSource = {
   id: string;
@@ -123,6 +124,7 @@ function newTemplate(): AgentTemplate {
     model: '', tools: ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob'],
     mcpServers: [], eventSources: [], skills: [], knowledgeSourceIds: [],
     effort: 'high', maxTurns: 50, permissionMode: 'default',
+    a2aPublished: false, a2aRemoteAgents: [],
     createdAt: Date.now(), updatedAt: Date.now(),
   };
 }
@@ -463,6 +465,32 @@ export default function Agents() {
       setError('视觉识别模型不在供应商可用模型中');
       return;
     }
+    const normalizedA2ARemotes = (form.a2aRemoteAgents || []).map((remote) => ({
+      name: remote.name.trim(),
+      agentCardUrl: remote.agentCardUrl.trim(),
+      credentialRef: remote.credentialRef?.trim() || undefined,
+    }));
+    if (normalizedA2ARemotes.length > 16) {
+      setError('每个 Agent 最多配置 16 个远程 A2A Agent');
+      return;
+    }
+    const incompleteRemoteIndex = normalizedA2ARemotes.findIndex(remote => !remote.name || !remote.agentCardUrl);
+    if (incompleteRemoteIndex >= 0) {
+      setError(`远程 A2A Agent 第 ${incompleteRemoteIndex + 1} 行需要名称和 Agent Card URL`);
+      return;
+    }
+    const invalidRemoteUrlIndex = normalizedA2ARemotes.findIndex((remote) => {
+      try { new URL(remote.agentCardUrl); return false; } catch { return true; }
+    });
+    if (invalidRemoteUrlIndex >= 0) {
+      setError(`远程 A2A Agent 第 ${invalidRemoteUrlIndex + 1} 行的 Agent Card URL 无效`);
+      return;
+    }
+    const remoteNameKeys = normalizedA2ARemotes.map(remote => remote.name.toLocaleLowerCase('en-US'));
+    if (new Set(remoteNameKeys).size !== remoteNameKeys.length) {
+      setError('远程 A2A Agent 名称不能重复');
+      return;
+    }
     const now = Date.now();
     const selectedKnowledgeIds = (form.knowledgeSourceIds || []).filter(Boolean);
     const selectedSkills = form.skills || [];
@@ -483,6 +511,8 @@ export default function Agents() {
       useKnowledge: selectedKnowledgeIds.length > 0 || hasLegacyAllKnowledge || undefined,
       visualPreprocessDefault: form.visualPreprocessDefault === true ? true : undefined,
       visualPreprocessModel: visualModel || undefined,
+      a2aPublished: form.a2aPublished === true,
+      a2aRemoteAgents: normalizedA2ARemotes,
       providerOverrides: undefined,
       tools: selectedKnowledgeIds.length > 0 || hasLegacyAllKnowledge
         ? Array.from(new Set([...effectiveTools, ...KNOWLEDGE_TOOLS]))
@@ -819,6 +849,7 @@ export default function Agents() {
     ...(template.skills || []),
     ...(template.mcpServers || []),
     ...(template.eventSources || []),
+    ...(template.a2aRemoteAgents || []).flatMap(remote => [remote.name, remote.agentCardUrl]),
   ].join(' ').toLowerCase();
 
   const matchesMarketSearch = (template: AgentTemplate) => (
@@ -850,10 +881,12 @@ export default function Agents() {
     const summary = (t.description || t.systemPrompt.slice(0, 140)).trim() || '暂无描述';
     const knowledgeCount = (t.knowledgeSourceIds || []).length || (t.useKnowledge ? liveKnowledgeSources.filter(source => source.enabled).length : 0);
     const featureBadges = [
+      t.a2aPublished ? 'A2A 已发布' : '',
+      (t.a2aRemoteAgents || []).length > 0 ? `远程 A2A×${t.a2aRemoteAgents.length}` : '',
       knowledgeCount > 0 ? `知识库×${knowledgeCount || '全部'}` : '',
       t.visualPreprocessDefault ? '视觉预处理' : '',
       (t.skills || []).includes('agentma-visual') && !t.visualPreprocessDefault ? '可视化' : '',
-    ].filter(Boolean).slice(0, 2);
+    ].filter(Boolean).slice(0, 3);
     return (
       <div
         key={`${scope}-${t.id}`}
@@ -1524,6 +1557,16 @@ export default function Agents() {
                 enableFileCheckpointing — 编辑前快照文件，支持 /rewind 回滚
               </span>
             </label>
+
+            <A2AConfigEditor
+              key={user?.tenantId || 'signed-out'}
+              templateId={form.id}
+              published={form.a2aPublished === true}
+              remoteAgents={form.a2aRemoteAgents || []}
+              canManageCredentials={user?.role === 'tenant_admin'}
+              onPublishedChange={a2aPublished => setForm(current => ({ ...current, a2aPublished }))}
+              onRemoteAgentsChange={a2aRemoteAgents => setForm(current => ({ ...current, a2aRemoteAgents }))}
+            />
 
             {/* 知识库选择 */}
             <div className="form-group">

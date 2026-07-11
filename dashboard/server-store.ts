@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -4389,6 +4390,10 @@ export function updateInternalToolSetting(
 }
 
 // ═══ Agent Templates (personal + published per tenant) ═══
+const MAX_A2A_REMOTE_AGENTS = 16;
+const MAX_A2A_REMOTE_NAME_LENGTH = 64;
+const MAX_A2A_CARD_URL_BYTES = 2048;
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS agent_templates (
     tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -4423,6 +4428,83 @@ function agentTemplateCreatedBy(template: Record<string, unknown>) {
   return typeof template.createdBy === 'string' ? template.createdBy : '';
 }
 
+function agentTemplateValidationError(message: string) {
+  return Object.assign(new Error(message), { status: 400 });
+}
+
+function isLoopbackA2AHostname(hostname: string) {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  if (net.isIP(normalized) === 4) return normalized.split('.')[0] === '127';
+  if (net.isIP(normalized) === 6) {
+    return normalized === '::1'
+      || normalized.startsWith('::ffff:127.')
+      || normalized.startsWith('0:0:0:0:0:ffff:127.');
+  }
+  return false;
+}
+
+function normalizeStoredA2ARemoteAgents(tenantId: string, value: unknown) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw agentTemplateValidationError('a2aRemoteAgents must be an array');
+  if (value.length > MAX_A2A_REMOTE_AGENTS) {
+    throw agentTemplateValidationError(`a2aRemoteAgents supports at most ${MAX_A2A_REMOTE_AGENTS} entries`);
+  }
+
+  const credentialIds = new Set((db.prepare(`
+    SELECT id FROM a2a_credentials WHERE tenant_id = ?
+  `).all(tenantId) as Array<{ id: string }>).map((row) => String(row.id)));
+  const seenNames = new Set<string>();
+
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}] must be an object`);
+    }
+    const raw = item as Record<string, unknown>;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    const hasControlCharacter = Array.from(name).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+    if (!name || name.length > MAX_A2A_REMOTE_NAME_LENGTH || hasControlCharacter) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].name must be 1-${MAX_A2A_REMOTE_NAME_LENGTH} printable characters`);
+    }
+    const nameKey = name.toLocaleLowerCase('en-US');
+    if (seenNames.has(nameKey)) throw agentTemplateValidationError(`duplicate A2A remote Agent name: ${name}`);
+    seenNames.add(nameKey);
+
+    const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
+    if (!agentCardUrl || Buffer.byteLength(agentCardUrl, 'utf8') > MAX_A2A_CARD_URL_BYTES) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].agentCardUrl is required and must not exceed ${MAX_A2A_CARD_URL_BYTES} bytes`);
+    }
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(agentCardUrl);
+    } catch {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].agentCardUrl must be an absolute URL`);
+    }
+    if (parsedUrl.username || parsedUrl.password) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].agentCardUrl must not contain credentials`);
+    }
+    const allowLoopbackHttp = process.env.AGENTMA_A2A_ALLOW_LOOPBACK_HTTP === '1';
+    const allowedProtocol = parsedUrl.protocol === 'https:'
+      || (allowLoopbackHttp && parsedUrl.protocol === 'http:' && isLoopbackA2AHostname(parsedUrl.hostname));
+    if (!allowedProtocol) {
+      throw agentTemplateValidationError('A2A Agent Card URLs must use HTTPS; loopback HTTP requires AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1');
+    }
+
+    const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
+    if (credentialRef && !credentialIds.has(credentialRef)) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].credentialRef is not available in this tenant`);
+    }
+    return {
+      name,
+      agentCardUrl,
+      ...(credentialRef ? { credentialRef } : {}),
+    };
+  });
+}
+
 function canManageAgentTemplate(template: Record<string, unknown>, actorSub?: string | null, actorRole?: Role | null) {
   if (!actorSub || actorRole === 'tenant_admin') return true;
   return agentTemplateCreatedBy(template) === actorSub;
@@ -4453,6 +4535,7 @@ function normalizeStoredAgentTemplate(
   const createdBy = existing
     ? existingCreatedBy ?? actorSub ?? null
     : actorSub ?? (typeof template.createdBy === 'string' ? template.createdBy : null);
+  const a2aRemoteAgents = normalizeStoredA2ARemoteAgents(tenantId, template.a2aRemoteAgents);
   return {
     ...template,
     id,
@@ -4461,6 +4544,8 @@ function normalizeStoredAgentTemplate(
     publishedAt,
     archivedAt,
     deletedAt,
+    a2aPublished: template.a2aPublished === true,
+    a2aRemoteAgents,
     createdAt,
     updatedAt,
   };

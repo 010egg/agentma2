@@ -210,6 +210,9 @@ async function main() {
     const mcpServers = fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers : {};
     const preDeleteChecks = {
       templateCreated: Boolean(template.id && storedTemplate?.seedDir),
+      a2aDefaults: storedTemplate?.a2aPublished === false
+        && Array.isArray(storedTemplate?.a2aRemoteAgents)
+        && storedTemplate.a2aRemoteAgents.length === 0,
       popularityDefaulted: storedTemplate?.popularity?.runCount === 0,
       strippedTopDir: fs.existsSync(path.join(seedDir, 'CLAUDE.md')) && !fs.existsSync(path.join(seedDir, 'cc-project')),
       settingsDisabled: fs.existsSync(path.join(seedDir, '.claude', 'settings.json.imported')) && !fs.existsSync(path.join(seedDir, '.claude', 'settings.json')),
