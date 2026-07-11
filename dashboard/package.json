@@ -11,6 +11,7 @@
     "smoke:a2a-credentials": "tsx scripts/smoke-a2a-credentials.mjs",
     "smoke:a2a-template-config": "AGENTMA_SMOKE_START_SERVER=1 node scripts/smoke-a2a-template-config.mjs",
     "smoke:a2a-protocol": "tsx scripts/smoke-a2a-protocol.mjs",
+    "smoke:a2a-execution": "tsx scripts/smoke-a2a-execution.mjs",
     "smoke:chat-collaboration": "node scripts/smoke-chat-collaboration.mjs",
     "smoke:chat-resume": "node scripts/smoke-chat-resume.mjs",
     "smoke:chat-ask-user-question": "node scripts/smoke-chat-ask-user-question.mjs",

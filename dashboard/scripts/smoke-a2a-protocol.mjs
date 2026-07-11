@@ -186,7 +186,7 @@ try {
   assert.equal(card.supportedInterfaces[0].protocolVersion, '1.0');
   assert.equal(card.supportedInterfaces[0].protocolBinding, 'JSONRPC');
   assert.equal(card.supportedInterfaces[0].url, `${baseUrl}/a2a/agents/${agent.id}/rpc`);
-  assert.equal(card.capabilities.streaming, false);
+  assert.equal(card.capabilities.streaming, true);
   assert.equal(card.securitySchemes.agentmaApiKey.httpAuthSecurityScheme.bearerFormat, 'AgentMa API Key');
   const serializedCard = JSON.stringify(card);
   for (const secret of [agent.systemPrompt, agent.model, admin.tenantId, '/private/', 'a2aRemoteAgents']) {
@@ -234,7 +234,17 @@ try {
   assert.equal(unknownMethod.body.error?.code, -32601);
 
   const unsupportedSend = await rpc(baseUrl, agent.id, apiKey.rawKey, {
-    jsonrpc: '2.0', id: 'send', method: 'SendMessage', params: { tenant: 'untrusted' },
+    jsonrpc: '2.0',
+    id: 'send',
+    method: 'SendMessage',
+    params: {
+      tenant: 'untrusted',
+      message: {
+        messageId: crypto.randomUUID(),
+        role: 'ROLE_USER',
+        parts: [{ text: 'provider preflight' }],
+      },
+    },
   });
   assert.equal(unsupportedSend.response.status, 200);
   assert.equal(unsupportedSend.body.error?.code, -32004);

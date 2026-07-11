@@ -8,7 +8,9 @@ import {
   type ListTasksRequest,
   type ListTasksResponse,
   type Message,
+  type SendMessageRequest,
   type StreamResponse,
+  type SubscribeToTaskRequest,
   type Task,
   type TaskPushNotificationConfig,
 } from '@a2a-js/sdk';
@@ -16,7 +18,6 @@ import {
   A2ARequestHandler,
   JsonRpcTransportHandler,
   RequestMalformedError,
-  TaskNotCancelableError,
   TaskNotFoundError,
   UnsupportedOperationError,
   VersionNotSupportedError,
@@ -24,15 +25,16 @@ import {
 import { agentCardHandler, jsonRpcHandler } from '@a2a-js/sdk/server/express';
 import {
   A2AStoreError,
-  a2aTaskStateIsTerminal,
   getA2ATask,
-  listA2AArtifacts,
-  listA2AMessages,
   listA2ATasks,
-  transitionA2ATask,
   type A2ATaskRecord,
   type A2ATaskScope,
 } from './server-a2a-store.ts';
+import {
+  A2AExecutionManager,
+  a2aExecutionManager,
+  a2aTaskToProtocol,
+} from './server-a2a-executor.ts';
 import {
   authenticateToken,
   findUniquePublishedA2AAgentTemplate,
@@ -123,7 +125,7 @@ function buildAgentCard(template: Record<string, unknown>, req: Request): AgentC
     provider: { organization: 'AgentMa', url: requestBaseUrl(req) },
     version: '1.0.0',
     capabilities: {
-      streaming: false,
+      streaming: true,
       pushNotifications: false,
       extensions: [],
       extendedAgentCard: false,
@@ -148,37 +150,6 @@ function buildAgentCard(template: Record<string, unknown>, req: Request): AgentC
   };
 }
 
-function boundedHistoryLength(value: number | undefined) {
-  if (value === undefined) return undefined;
-  if (!Number.isFinite(value) || value <= 0) return 0;
-  return Math.min(1000, Math.floor(value));
-}
-
-function taskToProtocol(
-  scope: A2ATaskScope,
-  record: A2ATaskRecord,
-  historyLength?: number,
-  includeArtifacts = true,
-): Task {
-  const limit = boundedHistoryLength(historyLength);
-  const history = listA2AMessages(scope, record.id, limit).map((item) => item.message);
-  const artifacts = includeArtifacts
-    ? listA2AArtifacts(scope, record.id).map((item) => item.artifact)
-    : [];
-  return {
-    id: record.id,
-    contextId: record.contextId,
-    status: {
-      state: record.state,
-      message: record.statusMessage || record.finalMessage || undefined,
-      timestamp: new Date(record.updatedAt).toISOString(),
-    },
-    artifacts,
-    history,
-    metadata: undefined,
-  };
-}
-
 function mapStoreError(error: unknown) {
   if (error instanceof A2AStoreError && (error.code === 'invalid_input' || error.code === 'invalid_cursor')) {
     return new RequestMalformedError(error.message);
@@ -191,6 +162,7 @@ class AgentMaA2ARequestHandler implements A2ARequestHandler {
     private readonly card: AgentCard,
     private readonly auth: AuthIdentity,
     private readonly templateId: string,
+    private readonly executionManager: A2AExecutionManager,
   ) {}
 
   private scope(): A2ATaskScope {
@@ -209,12 +181,18 @@ class AgentMaA2ARequestHandler implements A2ARequestHandler {
     throw new UnsupportedOperationError('Extended Agent Cards are not supported.');
   }
 
-  async sendMessage(): Promise<Message | Task> {
-    throw new UnsupportedOperationError('Agent execution will be enabled by the next A2A runtime slice.');
+  async sendMessage(params: SendMessageRequest): Promise<Message | Task> {
+    const submitted = this.executionManager.submit(this.auth, await this.template(), params);
+    if (params.configuration?.returnImmediately) {
+      return a2aTaskToProtocol(this.scope(), submitted.task);
+    }
+    const completed = await this.executionManager.wait(this.scope(), submitted.task.id);
+    return a2aTaskToProtocol(this.scope(), completed, params.configuration?.historyLength);
   }
 
-  sendMessageStream(): AsyncGenerator<StreamResponse, void, undefined> {
-    return unsupportedStream('Streaming agent execution is not enabled yet.');
+  async *sendMessageStream(params: SendMessageRequest): AsyncGenerator<StreamResponse, void, undefined> {
+    const submitted = this.executionManager.submit(this.auth, await this.template(), params);
+    yield* this.executionManager.stream(this.scope(), submitted.task.id);
   }
 
   async getTask(params: GetTaskRequest) {
@@ -226,7 +204,7 @@ class AgentMaA2ARequestHandler implements A2ARequestHandler {
       throw mapStoreError(error);
     }
     if (!record) throw new TaskNotFoundError();
-    return taskToProtocol(scope, record, params.historyLength);
+    return a2aTaskToProtocol(scope, record, params.historyLength);
   }
 
   async listTasks(params: ListTasksRequest): Promise<ListTasksResponse> {
@@ -250,7 +228,7 @@ class AgentMaA2ARequestHandler implements A2ARequestHandler {
       throw mapStoreError(error);
     }
     return {
-      tasks: result.tasks.map((task) => taskToProtocol(
+      tasks: result.tasks.map((task) => a2aTaskToProtocol(
         scope,
         task,
         params.historyLength,
@@ -264,26 +242,7 @@ class AgentMaA2ARequestHandler implements A2ARequestHandler {
 
   async cancelTask(params: CancelTaskRequest) {
     const scope = this.scope();
-    let current: A2ATaskRecord | null;
-    try {
-      current = getA2ATask(scope, params.id);
-    } catch (error) {
-      throw mapStoreError(error);
-    }
-    if (!current) throw new TaskNotFoundError();
-    if (a2aTaskStateIsTerminal(current.state)) throw new TaskNotCancelableError();
-    try {
-      const { task } = transitionA2ATask(scope, current.id, {
-        state: TaskState.TASK_STATE_CANCELED,
-      });
-      return taskToProtocol(scope, task);
-    } catch (error) {
-      if (error instanceof A2AStoreError) {
-        if (error.code === 'not_found') throw new TaskNotFoundError();
-        if (error.code === 'terminal' || error.code === 'invalid_transition') throw new TaskNotCancelableError();
-      }
-      throw mapStoreError(error);
-    }
+    return a2aTaskToProtocol(scope, this.executionManager.cancel(scope, params.id));
   }
 
   async createTaskPushNotificationConfig(): Promise<TaskPushNotificationConfig> {
@@ -302,14 +261,15 @@ class AgentMaA2ARequestHandler implements A2ARequestHandler {
     throw new UnsupportedOperationError('Push notifications are not supported.');
   }
 
-  resubscribe(): AsyncGenerator<StreamResponse, void, undefined> {
-    return unsupportedStream('Task resubscription is not supported yet.');
+  resubscribe(params: SubscribeToTaskRequest): AsyncGenerator<StreamResponse, void, undefined> {
+    return this.executionManager.stream(this.scope(), params.id);
   }
-}
 
-async function* unsupportedStream(message: string): AsyncGenerator<StreamResponse, void, undefined> {
-  yield* [] as StreamResponse[];
-  throw new UnsupportedOperationError(message);
+  private async template() {
+    const template = getPublishedA2AAgentTemplate(this.auth.tenantId, this.templateId);
+    if (!template) throw new TaskNotFoundError('A2A agent not found.');
+    return template;
+  }
 }
 
 function bearerToken(req: Request) {
@@ -341,7 +301,11 @@ function rejectUnauthorized(res: Response) {
   res.status(401).json({ error: 'A valid AgentMa API Key is required.' });
 }
 
-export function mountA2ARoutes(app: Express) {
+export function mountA2ARoutes(
+  app: Express,
+  options: { executionManager?: A2AExecutionManager } = {},
+) {
+  const executionManager = options.executionManager || a2aExecutionManager;
   app.use('/a2a/agents/:templateId/.well-known/agent-card.json', (req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD');
@@ -380,7 +344,7 @@ export function mountA2ARoutes(app: Express) {
       return;
     }
     const card = buildAgentCard(template, req);
-    const requestHandler = new AgentMaA2ARequestHandler(card, auth, String(template.id));
+    const requestHandler = new AgentMaA2ARequestHandler(card, auth, String(template.id), executionManager);
     jsonRpcHandler({
       requestHandler,
       userBuilder: async () => ({ isAuthenticated: true, userName: auth.sub }),
