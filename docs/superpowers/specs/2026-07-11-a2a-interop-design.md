@@ -93,6 +93,8 @@ type AgentTemplateA2AConfig = {
 
 `credentialRef` identifies a tenant-owned secret. The template API may return the reference identifier but never the resolved secret. Secret values must not appear in Agent Cards, logs, audit payloads, A2A messages, tool results, or frontend state.
 
+No tenant-scoped secret store exists in AgentMa today. This design introduces the minimal one needed for `credentialRef`; see `a2a_credentials` under Persistence. This is new infrastructure, not a reuse of an existing mechanism.
+
 The existing Agent editor gains:
 
 - An A2A publishing toggle.
@@ -101,7 +103,7 @@ The existing Agent editor gains:
 
 ## Persistence
 
-SQLite gains four tenant-scoped tables.
+SQLite gains five tenant-scoped tables.
 
 ### `a2a_tasks`
 
@@ -136,6 +138,24 @@ Stores task artifacts. Final structured output becomes a JSON artifact. Final te
 Stores an increasing sequence number and serialized A2A event for each task. The event log supports stream replay after reconnect and provides an audit trail. Retention follows the same policy as task records; no event is stored outside its task's tenant and caller scope.
 
 On process startup, tasks left in submitted, working, or input-required states are marked failed with a restart-interruption reason. Historical tasks remain queryable.
+
+### `a2a_credentials`
+
+Stores the tenant-owned secrets referenced by `credentialRef`. This table does not exist yet in AgentMa and is new infrastructure introduced by this design, not a reuse of an existing secrets mechanism:
+
+- `id` (the value stored in `credentialRef`)
+- `tenant_id`
+- `name`
+- `secret_ciphertext`
+- `created_by`
+- `created_at`
+- `rotated_at`
+
+Secrets are encrypted at rest and decrypted only immediately before a remote RPC call, in memory, for the duration of that call. The template API, Agent Card generation, task/message/event persistence, and audit logging all read and write the `id`, never `secret_ciphertext` or the decrypted value. A credential-management UI (create, rotate, delete; never display) is required alongside the remote-Agent editor.
+
+Credential encryption uses AES-256-GCM with a fresh nonce for every create or rotation and a versioned ciphertext envelope. The 32-byte master key comes from `AGENTMA_A2A_CREDENTIAL_KEY` when configured; otherwise the single-host deployment creates `a2a-credential-key` beside `jwt-secret` in the AgentMa data directory with owner-only permissions. It is deliberately separate from the JWT signing key so either key can be rotated independently. Startup fails closed for credential operations if the configured key is malformed or an existing ciphertext cannot be authenticated.
+
+Credential deletion is rejected while any non-deleted template in the tenant references the credential. The caller must detach or replace all references first. Rotation keeps the same credential ID, so templates do not need to change.
 
 ## Operations and State Mapping
 
@@ -173,12 +193,14 @@ When either requests input:
 
 1. Persist the pending interaction descriptor on the task.
 2. Transition the task to `TASK_STATE_INPUT_REQUIRED` with a clear Agent message describing the required decision or answer.
-3. Keep the live execution suspended for a bounded period.
+3. Keep the live execution suspended for 30 minutes by default. `AGENTMA_A2A_INPUT_TIMEOUT_MS` may override the duration within a validated range of 1 minute to 24 hours.
 4. Accept a new `SendMessage` whose message has the same `contextId` and the pending task's `taskId`.
 5. Validate and translate the response into the existing permission or question resolver.
 6. Transition back to `TASK_STATE_WORKING` and continue execution.
 
 If the process restarts while input is pending, the original in-memory SDK execution cannot be resumed safely. The task is marked failed with an interruption explanation. The client may start a new task in the same context using the stored conversation messages.
+
+AgentMa's current deployment is a single long-lived process on one host, restarted manually (`npm run build` + `launchctl kickstart`) or by a crash-loop, not a rolling multi-instance deployment. Every restart therefore fails every task that happens to be in `input-required` at that moment. The restart-interruption behavior above is an accepted operational cost of the current deployment model, not an edge case. A pre-restart drain workflow is outside this release.
 
 A normal follow-up message in the same context creates a new task. It does not mutate a completed task.
 
@@ -228,6 +250,8 @@ Remote Agent Card and RPC URLs are untrusted input. The remote client must:
 - Avoid forwarding inbound headers other than explicitly supported A2A service parameters and the resolved remote credential.
 
 These controls apply to initial Card discovery and every subsequent RPC endpoint selected from the Card.
+
+No SSRF-guarding module exists elsewhere in the AgentMa server today (the built-in `WebFetch` tool's network policy lives inside the Agent SDK, not in this codebase, and is not directly reusable here). This design should therefore implement these controls once, as a standalone outbound-URL-fetching module independent of `server-a2a.ts`, rather than inline in the A2A remote-client code. Any future AgentMa feature that fetches a tenant-supplied URL (remote MCP server config, webhook-style integrations, etc.) should reuse this module instead of re-implementing DNS/redirect/SSRF checks.
 
 ## Authentication and Authorization
 
@@ -324,10 +348,10 @@ The feature is complete when:
 ## Implementation Sequence
 
 1. Add the official SDK and define the protocol adapter interfaces.
-2. Add template fields, validation, storage, and Agent editor controls.
+2. Add the `a2a_credentials` table and credential-management UI (create/rotate/delete, never display), then template fields, validation, storage, and Agent editor controls.
 3. Add A2A task/message/artifact/event storage and startup reconciliation.
 4. Implement Agent Card and authenticated JSON-RPC routing.
 5. Implement execution, state mapping, streaming, replay, listing, and cancellation.
 6. Implement input-required pause and live continuation.
-7. Implement secure remote Card discovery, secret resolution, and generated remote tools.
+7. Implement the standalone outbound-URL SSRF-guarding module, then secure remote Card discovery, credential resolution, and generated remote tools on top of it.
 8. Add protocol, bidirectional, security, and regression tests.
