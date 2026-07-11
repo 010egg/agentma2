@@ -52,6 +52,10 @@ import {
   type AuthIdentity,
 } from './server-store.ts';
 import type { RunOutcome } from './src/simulator/run-state.ts';
+import {
+  A2AInputRegistry,
+  type A2AInputDescriptor,
+} from './server-a2a-input.ts';
 
 const MAX_MESSAGE_BYTES = 1024 * 1024;
 const MAX_PARTS = 64;
@@ -281,7 +285,10 @@ export function a2aTaskToProtocol(
 export class A2AExecutionManager {
   private readonly liveRuns = new Map<string, LiveRun>();
 
-  constructor(private readonly runAgentImpl: RunAgentImplementation = runAgent) {}
+  constructor(
+    private readonly runAgentImpl: RunAgentImplementation = runAgent,
+    private readonly inputRegistry = new A2AInputRegistry(),
+  ) {}
 
   private prepare(auth: AuthIdentity, template: Record<string, unknown>): PreparedRun {
     const model = typeof template.model === 'string' ? template.model.trim() : '';
@@ -403,6 +410,44 @@ export class A2AExecutionManager {
     }
   }
 
+  private inputRequiredMessage(live: LiveRun, descriptor: A2AInputDescriptor) {
+    const text = descriptor.type === 'permission'
+      ? `Permission required for tool ${descriptor.toolName}. Continue with {"decision":"allow"} or {"decision":"deny"}.`
+      : 'Additional answers are required. Continue with {"answers":{"question":"answer"}}.';
+    return {
+      ...agentMessage(live.taskId, live.contextId, text),
+      parts: [textPart(text), dataPart(descriptor)],
+    } satisfies Message;
+  }
+
+  private failInputTimeout(live: LiveRun) {
+    const current = getA2ATask(live.scope, live.taskId);
+    if (!current || a2aTaskStateIsTerminal(current.state)) return;
+    if (!live.abortController.signal.aborted) live.abortController.abort();
+    const message = agentMessage(live.taskId, live.contextId, 'The A2A input request timed out.');
+    appendA2AMessage(live.scope, live.taskId, message);
+    this.persistEvent(live, { payload: { $case: 'message', value: message } });
+    this.transition(live, TaskState.TASK_STATE_FAILED, message, message, {
+      code: 'A2A_INPUT_TIMEOUT',
+      message: 'The A2A input request timed out.',
+    });
+    this.resolveDone(live);
+    this.closeSubscribers(live);
+  }
+
+  private inputCallbacks(live: LiveRun) {
+    return {
+      onPause: (descriptor: A2AInputDescriptor) => {
+        const message = this.inputRequiredMessage(live, descriptor);
+        this.transition(live, TaskState.TASK_STATE_INPUT_REQUIRED, message);
+      },
+      onResume: () => {
+        this.transition(live, TaskState.TASK_STATE_WORKING);
+      },
+      onTimeout: () => this.failInputTimeout(live),
+    };
+  }
+
   private finalState(live: LiveRun, result: AgentRunResult) {
     if (live.abortController.signal.aborted || live.outcome === 'stopped' || result.outcome === 'stopped') {
       return TaskState.TASK_STATE_CANCELED;
@@ -499,14 +544,16 @@ export class A2AExecutionManager {
         seedDir: resolveSeedDir(live.scope.tenantId, template),
         templateId: live.scope.templateId,
         emit: (event) => this.handleAgentEvent(live, event),
-        requestPermission: async () => ({
-          decision: 'deny',
-          reason: 'A2A permission continuation is not enabled until the input-required slice.',
-        }),
-        requestUserQuestion: async () => ({
-          answers: {},
-          reason: 'A2A question continuation is not enabled until the input-required slice.',
-        }),
+        requestPermission: this.inputRegistry.requestPermission(
+          live.scope,
+          live.taskId,
+          this.inputCallbacks(live),
+        ),
+        requestUserQuestion: this.inputRegistry.requestQuestions(
+          live.scope,
+          live.taskId,
+          this.inputCallbacks(live),
+        ),
         abortController: live.abortController,
       });
       this.finalize(live, result);
@@ -554,6 +601,7 @@ export class A2AExecutionManager {
       }
       this.resolveDone(live);
       this.closeSubscribers(live);
+      this.inputRegistry.cancel(live.scope, live.taskId);
       this.liveRuns.delete(live.key);
     }
   }
@@ -564,11 +612,21 @@ export class A2AExecutionManager {
     const prompt = promptFromMessage(message);
     const templateId = String(template.id || '').trim();
     const scope = { tenantId: auth.tenantId, templateId, callerSub: auth.sub };
+    if (message.taskId) {
+      const current = getA2ATask(scope, message.taskId);
+      if (!current || current.contextId !== message.contextId) {
+        throw new TaskNotFoundError('Input-required task not found.');
+      }
+      const duplicate = listA2AMessages(scope, current.id).some((item) => item.messageId === message.messageId);
+      if (!duplicate) {
+        this.inputRegistry.resume(scope, current.id, message, () => {
+          appendA2AMessage(scope, current.id, { ...message, taskId: current.id, contextId: current.contextId });
+        });
+      }
+      return { task: getA2ATask(scope, current.id)!, live: this.liveRuns.get(taskKey(scope, current.id)) || null };
+    }
     const existing = findA2ATaskByMessageId(scope, message.messageId);
     if (existing) return { task: existing, live: this.liveRuns.get(taskKey(scope, existing.id)) || null };
-    if (message.taskId) {
-      throw new UnsupportedOperationError('Task continuation will be enabled by the input-required slice.');
-    }
     const prepared = this.prepare(auth, template);
     const taskId = crypto.randomUUID();
     const contextId = message.contextId || crypto.randomUUID();
@@ -680,6 +738,7 @@ export class A2AExecutionManager {
     if (a2aTaskStateIsTerminal(current.state)) throw new TaskNotCancelableError();
     const live = this.liveRuns.get(taskKey(scope, taskId));
     if (live) {
+      this.inputRegistry.cancel(scope, taskId);
       if (!live.abortController.signal.aborted) live.abortController.abort();
       if (live.deltaTimer) {
         clearTimeout(live.deltaTimer);
