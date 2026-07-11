@@ -72,6 +72,8 @@ The adapter continues to enforce the existing provider routing, quota checks, pe
 
 `@a2a-js/sdk` supplies the A2A 1.0 models, JSON-RPC dispatch, SSE framing, Agent Card helpers, and client implementation. AgentMa-specific code supplies execution and storage implementations. Protocol objects are validated at ingress and emitted only in the A2A 1.0 representation.
 
+At design time, the official JavaScript SDK publishes A2A 1.0 as `1.0.0-beta.0` while its npm `latest` tag remains on the 0.3 line. The implementation pins the exact 1.0 beta version, verifies its server and client behavior with a protocol smoke test before building adapters, and does not accept automatic prerelease upgrades. This dependency may move to a stable 1.0 release only after the same protocol tests pass unchanged.
+
 ## Template Configuration
 
 Agent templates gain these fields:
