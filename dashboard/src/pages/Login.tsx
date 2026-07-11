@@ -53,7 +53,7 @@ export default function Login() {
               <div className="form-group">
                 <label>邮箱</label>
                 <input type="email" value={email} onChange={e => setEmail(e.target.value)}
-                  placeholder="email@example.com" required />
+                  placeholder="name@company.com" title="支持常见公共邮箱和企业邮箱" required />
               </div>
               <div className="form-group">
                 <label>密码</label>

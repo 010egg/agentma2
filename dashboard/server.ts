@@ -17,6 +17,7 @@ import {
   authenticateToken,
   canAccessChatSession,
   createApiKey,
+  createA2ACredential,
   createDatasource,
   createTenantUser,
   createTeam,
@@ -26,6 +27,7 @@ import {
   deletePublicSkill,
   deleteDatasource,
   deleteUser,
+  deleteA2ACredential,
   deleteChatSession,
   deleteVisual,
   forkChatSession,
@@ -44,6 +46,7 @@ import {
   evaluatePermissionRules,
   listAgentTemplates,
   listApiKeys,
+  listA2ACredentials,
   listAuditLogs,
   listChatSessions,
   listChatSessionSummaries,
@@ -79,6 +82,7 @@ import {
   resolveProviderProfileForModel,
   resolveQuotaUserId,
   revokeApiKey,
+  rotateA2ACredential,
   saveChatSession,
   scanKnowledgeSources,
   signJWT,
@@ -2760,6 +2764,38 @@ app.delete('/api/api-keys/:id', authMiddleware, requireAdmin, (req: any, res) =>
   const ok = revokeApiKey(req.auth.tenantId, req.params.id);
   if (!ok) { res.status(404).json({ error: 'not found' }); return; }
   audit(req.auth.tenantId, 'revoke_api_key', req.auth.sub, 'user', `apikey:${req.params.id}`);
+  res.json({ ok: true });
+});
+
+// ═══ A2A Remote Credentials Routes ═══
+app.get('/api/a2a/credentials', authMiddleware, requireAdmin, (req: any, res) => {
+  if (req.auth.authType === 'api_key') { res.status(403).json({ error: 'API Key 无法管理远程凭据，请使用密码登录' }); return; }
+  res.json(listA2ACredentials(req.auth.tenantId));
+});
+
+app.post('/api/a2a/credentials', authMiddleware, requireAdmin, (req: any, res) => {
+  if (req.auth.authType === 'api_key') { res.status(403).json({ error: 'API Key 无法管理远程凭据，请使用密码登录' }); return; }
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const secret = typeof req.body?.secret === 'string' ? req.body.secret : '';
+  if (!name || name.length > 128) { res.status(400).json({ error: 'name must be 1-128 characters' }); return; }
+  if (!secret || Buffer.byteLength(secret, 'utf8') > 16_384) { res.status(400).json({ error: 'secret must be 1-16384 bytes' }); return; }
+  res.status(201).json(createA2ACredential(req.auth.tenantId, req.auth.email || null, name, secret));
+});
+
+app.put('/api/a2a/credentials/:id', authMiddleware, requireAdmin, (req: any, res) => {
+  if (req.auth.authType === 'api_key') { res.status(403).json({ error: 'API Key 无法管理远程凭据，请使用密码登录' }); return; }
+  const secret = typeof req.body?.secret === 'string' ? req.body.secret : '';
+  if (!secret || Buffer.byteLength(secret, 'utf8') > 16_384) { res.status(400).json({ error: 'secret must be 1-16384 bytes' }); return; }
+  const saved = rotateA2ACredential(req.auth.tenantId, req.params.id, req.auth.sub, secret);
+  if (!saved) { res.status(404).json({ error: 'not found' }); return; }
+  res.json(saved);
+});
+
+app.delete('/api/a2a/credentials/:id', authMiddleware, requireAdmin, (req: any, res) => {
+  if (req.auth.authType === 'api_key') { res.status(403).json({ error: 'API Key 无法管理远程凭据，请使用密码登录' }); return; }
+  const result = deleteA2ACredential(req.auth.tenantId, req.params.id, req.auth.sub);
+  if (!result.ok && result.reason === 'in_use') { res.status(409).json({ error: 'credential is referenced by an Agent template' }); return; }
+  if (!result.ok) { res.status(404).json({ error: 'not found' }); return; }
   res.json({ ok: true });
 });
 

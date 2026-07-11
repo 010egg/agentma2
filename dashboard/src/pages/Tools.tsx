@@ -164,9 +164,15 @@ export default function Tools() {
   const tags = Array.from(new Set(allTools.map(t => t.category)));
   const persist = (list: RegisteredTool[]) => { setCustomTools(list); saveCustomTools(list); };
 
+  const searchQuery = search.trim().toLowerCase();
   const filtered = allTools
-    .filter(t => tagFilter === 'all' || t.category === tagFilter)
-    .filter(t => { if (!search) return true; const q = search.toLowerCase(); return t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.category.toLowerCase().includes(q); });
+    .filter(t => searchQuery || tagFilter === 'all' || t.category === tagFilter)
+    .filter(t => {
+      if (!searchQuery) return true;
+      return t.name.toLowerCase().includes(searchQuery)
+        || t.description.toLowerCase().includes(searchQuery)
+        || t.category.toLowerCase().includes(searchQuery);
+    });
 
   const resetToolForm = () => {
     setForm({ ...EMPTY_TOOL_FORM });

@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { type FormEvent, useRef, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { AgentDefinition, AgentTemplate, EffortLevel, PermissionMode, SkillInfo, RegisteredTool } from '../simulator/types';
 import { EFFORT_LEVELS, PERMISSION_MODES, DEFAULT_SKILLS, initCustomTools } from '../simulator/mock-data';
@@ -7,6 +7,7 @@ import { bootstrapAgentTemplates, loadCachedAgentTemplates, replaceAgentTemplate
 import { getAuthHeaders } from '../utils/client-runtime';
 import { listProviderModels, resolveProviderForModel } from '../utils/providers';
 import ModelPicker from '../components/common/ModelPicker';
+import LineIcon from '../components/LineIcon';
 
 type KnowledgeSource = {
   id: string;
@@ -76,6 +77,8 @@ type AgentImportReport = {
   skipped: Array<{ path: string; reason: string }>;
   notes: string[];
 };
+
+type AgentMarketSort = 'popular' | 'updated' | 'name';
 
 function loadSkills(): SkillInfo[] {
   try {
@@ -211,6 +214,11 @@ export default function Agents() {
   const [importReport, setImportReport] = useState<AgentImportReport | null>(null);
   const [importedAgent, setImportedAgent] = useState<AgentTemplate | null>(null);
   const [isImportReportOpen, setIsImportReportOpen] = useState(false);
+  const [isGitImportOpen, setIsGitImportOpen] = useState(false);
+  const [gitImportUrl, setGitImportUrl] = useState('');
+  const [gitImportRef, setGitImportRef] = useState('');
+  const [marketSearch, setMarketSearch] = useState('');
+  const [marketSort, setMarketSort] = useState<AgentMarketSort>('popular');
   const importInputRef = useRef<HTMLInputElement | null>(null);
   // 动态加载技能和 MCP 服务器（非写死）
   const [liveSkills] = useState<SkillInfo[]>(loadSkills);
@@ -231,6 +239,7 @@ export default function Agents() {
   const mineTemplates = templates.filter(template => canManageTemplate(template));
   const visibleTemplateIds = new Set([...publicTemplates, ...mineTemplates].map(template => template.id));
   const hiddenTemplateCount = templates.length - visibleTemplateIds.size;
+  const normalizedMarketSearch = marketSearch.trim().toLowerCase();
 
   useEffect(() => {
     fetch('/api/events/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'list' }) })
@@ -275,6 +284,15 @@ export default function Agents() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isImportReportOpen]);
 
+  useEffect(() => {
+    if (!isGitImportOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsGitImportOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isGitImportOpen]);
+
   // 每次页面可见时刷新自定义工具
   useEffect(() => {
     const onFocus = () => setLiveCustomTools(initCustomTools());
@@ -317,6 +335,34 @@ export default function Agents() {
       });
 
     return () => { cancelled = true; };
+  }, [user?.tenantId, user?.role]);
+
+  useEffect(() => {
+    const tenantId = user?.tenantId;
+    if (!tenantId) return;
+
+    const refreshFromServer = () => {
+      void bootstrapAgentTemplates(tenantId, user.role === 'tenant_admin')
+        .then(setTemplates)
+        .catch(() => setTemplates(loadCachedAgentTemplates(tenantId)));
+    };
+    const refreshFromCache = () => setTemplates(loadCachedAgentTemplates(tenantId));
+    const onTemplatesUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ tenantId?: string }>).detail;
+      if (!detail?.tenantId || detail.tenantId === tenantId) refreshFromCache();
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key?.startsWith('agentma_templates')) refreshFromCache();
+    };
+
+    window.addEventListener('focus', refreshFromServer);
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('agentma:agent-templates-updated', onTemplatesUpdated);
+    return () => {
+      window.removeEventListener('focus', refreshFromServer);
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('agentma:agent-templates-updated', onTemplatesUpdated);
+    };
   }, [user?.tenantId, user?.role]);
 
   useEffect(() => {
@@ -582,6 +628,58 @@ export default function Agents() {
     }
   };
 
+  const handleImportGit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!user?.tenantId) return;
+    const url = gitImportUrl.trim();
+    const ref = gitImportRef.trim();
+    if (!url) {
+      setError('请输入 Git 仓库 URL');
+      return;
+    }
+
+    setIsImporting(true);
+    setError('');
+    try {
+      const response = await fetch('/api/agents/import/git', {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'new', url, ref }),
+      });
+      const text = await response.text();
+      let data: { template?: AgentTemplate; report?: AgentImportReport; error?: string } = {};
+      if (text) {
+        const trimmed = text.trimStart();
+        if (trimmed.startsWith('<')) {
+          throw new Error(`Git 导入接口返回了 HTML (${response.status})，后端可能未部署 /api/agents/import/git 或 /api 代理指向旧服务`);
+        }
+        try {
+          data = JSON.parse(text) as { template?: AgentTemplate; report?: AgentImportReport; error?: string };
+        } catch {
+          throw new Error('Git 导入接口返回了无法解析的响应');
+        }
+      }
+      if (!response.ok) throw new Error(data.error || `Git 导入失败: ${response.status}`);
+      if (!data.template || !data.report) throw new Error('Git 导入响应缺少模板或报告');
+      const refreshed = await bootstrapAgentTemplates(user.tenantId, user.role === 'tenant_admin');
+      setTemplates(refreshed);
+      const savedTemplate = refreshed.find((template) => template.id === data.template?.id) || data.template;
+      setForm(savedTemplate);
+      setIsEditing(true);
+      setIsEditorOpen(false);
+      setIsGitImportOpen(false);
+      setGitImportUrl('');
+      setGitImportRef('');
+      setImportedAgent(savedTemplate);
+      setImportReport(data.report);
+      setIsImportReportOpen(true);
+    } catch (importError) {
+      setError((importError as Error).message || 'Git 导入 Agent 失败');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   const toggleTool = (tool: string) => {
     setForm(prev => ({
       ...prev,
@@ -707,109 +805,162 @@ export default function Agents() {
     return `${Math.round((bytes || 0) / 1024)} KB`;
   };
 
+  const getPopularity = (template: AgentTemplate) => ({
+    runCount: Math.max(0, Math.floor(Number(template.popularity?.runCount) || 0)),
+    lastRunAt: Number(template.popularity?.lastRunAt) || null,
+  });
+
+  const getTemplateSearchText = (template: AgentTemplate) => [
+    template.name,
+    template.description,
+    template.systemPrompt,
+    template.model,
+    ...(template.tools || []),
+    ...(template.skills || []),
+    ...(template.mcpServers || []),
+    ...(template.eventSources || []),
+  ].join(' ').toLowerCase();
+
+  const matchesMarketSearch = (template: AgentTemplate) => (
+    !normalizedMarketSearch || getTemplateSearchText(template).includes(normalizedMarketSearch)
+  );
+
+  const compareTemplates = (a: AgentTemplate, b: AgentTemplate) => {
+    if (marketSort === 'name') return (a.name || '').localeCompare(b.name || '', 'zh-CN');
+    if (marketSort === 'updated') return (b.updatedAt || 0) - (a.updatedAt || 0);
+    const aPopularity = getPopularity(a);
+    const bPopularity = getPopularity(b);
+    return bPopularity.runCount - aPopularity.runCount
+      || (bPopularity.lastRunAt || 0) - (aPopularity.lastRunAt || 0)
+      || (b.updatedAt || 0) - (a.updatedAt || 0);
+  };
+
+  const visiblePublicTemplates = publicTemplates.filter(matchesMarketSearch).sort(compareTemplates);
+  const visibleMineTemplates = mineTemplates.filter(matchesMarketSearch).sort(compareTemplates);
+  const hasMarketSearch = normalizedMarketSearch.length > 0;
+
   const renderTemplateCard = (t: AgentTemplate, scope: 'public' | 'mine') => {
     const manageable = canManageTemplate(t);
     const published = isPublishedAgent(t);
+    const popularity = getPopularity(t);
     const ownerLabel = t.createdBy
       ? (t.createdBy === actor ? '你创建' : `创建人 ${t.createdBy}`)
       : '创建人未知';
+    const lastRunLabel = popularity.lastRunAt ? `最近使用 ${new Date(popularity.lastRunAt).toLocaleString()}` : '暂无使用记录';
+    const summary = (t.description || t.systemPrompt.slice(0, 140)).trim() || '暂无描述';
+    const knowledgeCount = (t.knowledgeSourceIds || []).length || (t.useKnowledge ? liveKnowledgeSources.filter(source => source.enabled).length : 0);
+    const featureBadges = [
+      knowledgeCount > 0 ? `知识库×${knowledgeCount || '全部'}` : '',
+      t.visualPreprocessDefault ? '视觉预处理' : '',
+      (t.skills || []).includes('agentma-visual') && !t.visualPreprocessDefault ? '可视化' : '',
+    ].filter(Boolean).slice(0, 2);
     return (
       <div
         key={`${scope}-${t.id}`}
-        className={`agent-card ${form.id === t.id ? 'selected' : ''}`}
+        className={`agent-card ${form.id === t.id ? 'selected' : ''} ${manageable ? '' : 'agent-card-readonly'}`}
         onClick={() => manageable ? handleSelect(t) : undefined}
         style={{ cursor: manageable ? 'pointer' : 'default' }}
       >
         <div className="agent-card-head">
-          <div style={{ minWidth: 0 }}>
-            <div className="agent-card-name">{t.name}</div>
+          <div className="agent-card-title-block">
+            <div className="agent-card-name-row">
+              <span className="agent-card-mark" aria-hidden="true">
+                <LineIcon name="agents" />
+              </span>
+              <div className="agent-card-name">{t.name || '未命名 Agent'}</div>
+            </div>
             <div className="agent-card-owner">{ownerLabel}</div>
           </div>
-          <div className="agent-card-actions">
-            <span className="agent-card-date">
-              {new Date(t.updatedAt).toLocaleDateString()}
+          <div className="agent-card-meta">
+            <span className={`badge ${published ? 'badge-success' : 'badge-muted'}`}>{published ? '公共' : '个人'}</span>
+            <span
+              className={`badge ${popularity.runCount > 0 ? 'badge-warning' : 'badge-muted'}`}
+              title={lastRunLabel}
+            >
+              使用 {popularity.runCount} 次
             </span>
-            <button
-              type="button"
-              className="btn btn-sm agent-card-preview-btn"
-              onClick={(event) => {
-                event.stopPropagation();
-                void openClaudeMdPreview(t);
-              }}
-              disabled={isSaving || !t.id}
-              title={`预览 ${t.name} 运行时生效的 CLAUDE.md`}
-            >
-              CLAUDE.md
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm agent-card-clone-btn"
-              onClick={(event) => {
-                event.stopPropagation();
-                void handleClone(t);
-              }}
-              disabled={isSaving || !t.id}
-              title={`克隆 ${t.name} 为新 Agent 模板`}
-            >
-              克隆
-            </button>
-            {manageable && (
-              <>
-                {published ? (
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void handleUnpublish(t);
-                    }}
-                    disabled={isSaving || !t.id}
-                  >
-                    撤回
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void handlePublish(t);
-                    }}
-                    disabled={isSaving || !t.id}
-                  >
-                    发布
-                  </button>
-                )}
-              </>
-            )}
-            <button
-              type="button"
-              className="btn btn-sm btn-primary agent-card-chat-btn"
-              onClick={(event) => {
-                event.stopPropagation();
-                startChat(t.id);
-              }}
-              disabled={isSaving || !t.id}
-              title={`和 ${t.name} 开始对话`}
-            >
-              开始对话
-            </button>
+            <span className="agent-card-date">{new Date(t.updatedAt).toLocaleDateString()}</span>
           </div>
         </div>
-        <div className="agent-card-desc">{t.description || t.systemPrompt.slice(0, 80)}</div>
-        <div className="agent-card-tags">
-          <span className="badge badge-muted">{t.model}</span>
-          <span className={`badge ${published ? 'badge-success' : 'badge-muted'}`}>{published ? '公共' : '个人'}</span>
-          {manageable ? <span className="badge badge-info">可编辑</span> : <span className="badge badge-muted">只读</span>}
-          {t.seedDir && <span className="badge badge-warning">本地项目 seed</span>}
-          {t.visualPreprocessDefault && <span className="badge badge-info">视觉预处理</span>}
-          {((t.knowledgeSourceIds || []).length > 0 || t.useKnowledge) && (
-            <span className="badge badge-success">
-              知识库×{(t.knowledgeSourceIds || []).length || liveKnowledgeSources.filter(source => source.enabled).length || '全部'}
-            </span>
+        <div className="agent-card-desc">{summary}</div>
+        {featureBadges.length > 0 && (
+          <div className="agent-card-tags">
+            {featureBadges.map(badge => (
+              <span key={badge} className="badge badge-info">{badge}</span>
+            ))}
+          </div>
+        )}
+        <div className="agent-card-actions" aria-label={`${t.name || 'Agent'} 操作`}>
+          <button
+            type="button"
+            className="btn btn-sm agent-card-preview-btn"
+            onClick={(event) => {
+              event.stopPropagation();
+              void openClaudeMdPreview(t);
+            }}
+            disabled={isSaving || !t.id}
+            title={`预览 ${t.name} 运行时生效的 CLAUDE.md`}
+          >
+            <LineIcon name="book" />
+            预览
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm agent-card-clone-btn"
+            onClick={(event) => {
+              event.stopPropagation();
+              void handleClone(t);
+            }}
+            disabled={isSaving || !t.id}
+            title={`克隆 ${t.name} 为新 Agent 模板`}
+          >
+            <LineIcon name="copy" />
+            克隆
+          </button>
+          {manageable && (
+            <>
+              {published ? (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleUnpublish(t);
+                  }}
+                  disabled={isSaving || !t.id}
+                >
+                  <LineIcon name="radio" />
+                  下线
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handlePublish(t);
+                  }}
+                  disabled={isSaving || !t.id}
+                >
+                  <LineIcon name="radio" />
+                  发布
+                </button>
+              )}
+            </>
           )}
-          {t.tools.slice(0, 3).map(tool => <span key={tool} className="badge badge-info">{tool}</span>)}
-          {t.tools.length > 3 && <span className="badge badge-muted">+{t.tools.length - 3}</span>}
+          <button
+            type="button"
+            className="btn btn-sm btn-primary agent-card-chat-btn"
+            onClick={(event) => {
+              event.stopPropagation();
+              startChat(t.id);
+            }}
+            disabled={isSaving || !t.id}
+            title={`和 ${t.name} 开始对话`}
+          >
+            <LineIcon name="chat" />
+            对话
+          </button>
         </div>
       </div>
     );
@@ -817,9 +968,14 @@ export default function Agents() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>🤖 Agent 市场</h1>
-        <p>创建可复用的 Agent 配置模版，选择工具和技能，保存后开启多轮对话</p>
+      <div className="page-header agents-page-header">
+        <h1 className="agents-page-title">
+          <span className="agents-page-title-icon" aria-hidden="true">
+            <LineIcon name="market" />
+          </span>
+          Agent 模板
+        </h1>
+        <p>公共模板与个人模板分区管理，配置工具和技能后即可开启对话。</p>
       </div>
 
       {error && (
@@ -833,7 +989,8 @@ export default function Agents() {
         <div className="agents-list-panel">
           <div className="agents-list-toolbar mb-4">
             <button className="btn btn-primary" onClick={handleNew} disabled={isSaving || isImporting}>
-              + 新建 Agent
+              <LineIcon name="spark" />
+              新建 Agent
             </button>
             <button
               type="button"
@@ -841,8 +998,35 @@ export default function Agents() {
               onClick={() => importInputRef.current?.click()}
               disabled={isSaving || isImporting}
             >
+              <LineIcon name="layers" />
               {isImporting ? '导入中...' : '导入本地项目'}
             </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setIsGitImportOpen(true)}
+              disabled={isSaving || isImporting}
+            >
+              <LineIcon name="radio" />
+              Git 导入
+            </button>
+            <div className="agents-market-controls" role="search">
+              <input
+                value={marketSearch}
+                onChange={event => setMarketSearch(event.target.value)}
+                placeholder="搜索 Agent 名称、描述、工具、技能"
+                aria-label="搜索 Agent"
+              />
+              <select
+                value={marketSort}
+                onChange={event => setMarketSort(event.target.value as AgentMarketSort)}
+                aria-label="Agent 排序"
+              >
+                <option value="popular">热度优先</option>
+                <option value="updated">最近更新</option>
+                <option value="name">名称</option>
+              </select>
+            </div>
             <input
               ref={importInputRef}
               type="file"
@@ -867,16 +1051,18 @@ export default function Agents() {
                 <div className="agents-section-head">
                   <div>
                     <div className="card-header" style={{ marginBottom: 3 }}>公共 Agent</div>
-                    <div className="tool-card-desc">已发布 {publicTemplates.length} 个，租户内成员都可以看到并使用。</div>
+                    <div className="tool-card-desc">
+                      已发布 {publicTemplates.length} 个{hasMarketSearch ? `，匹配 ${visiblePublicTemplates.length} 个` : ''}，租户内成员都可以看到并使用。
+                    </div>
                   </div>
                 </div>
-                {publicTemplates.length === 0 ? (
+                {visiblePublicTemplates.length === 0 ? (
                   <div className="agents-empty-panel">
-                    还没有公共 Agent。可以从“我的 Agent”发布一个。
+                    {hasMarketSearch ? '公共区没有匹配的 Agent。' : '还没有公共 Agent。可以从“我的 Agent”发布一个。'}
                   </div>
                 ) : (
                   <div className="agents-list-grid">
-                    {publicTemplates.map(template => renderTemplateCard(template, 'public'))}
+                    {visiblePublicTemplates.map(template => renderTemplateCard(template, 'public'))}
                   </div>
                 )}
               </section>
@@ -886,18 +1072,18 @@ export default function Agents() {
                   <div>
                     <div className="card-header" style={{ marginBottom: 3 }}>我的 Agent</div>
                     <div className="tool-card-desc">
-                      已拥有 {mineTemplates.length} 个。未发布的 Agent 只有创建人可见；发布后会出现在公共 Agent 中。
+                      已拥有 {mineTemplates.length} 个{hasMarketSearch ? `，匹配 ${visibleMineTemplates.length} 个` : ''}。未发布的 Agent 只有创建人可见；发布后会出现在公共 Agent 中。
                       {hiddenTemplateCount > 0 ? ` 另有 ${hiddenTemplateCount} 个不可编辑的公共项仅显示在上方。` : ''}
                     </div>
                   </div>
                 </div>
-                {mineTemplates.length === 0 ? (
+                {visibleMineTemplates.length === 0 ? (
                   <div className="agents-empty-panel">
-                    暂无个人 Agent，点击上方按钮创建或克隆公共 Agent。
+                    {hasMarketSearch ? '我的列表里没有匹配的 Agent。' : '暂无个人 Agent，点击上方按钮创建或克隆公共 Agent。'}
                   </div>
                 ) : (
                   <div className="agents-list-grid">
-                    {mineTemplates.map(template => renderTemplateCard(template, 'mine'))}
+                    {visibleMineTemplates.map(template => renderTemplateCard(template, 'mine'))}
                   </div>
                 )}
               </section>
@@ -1001,6 +1187,82 @@ export default function Agents() {
                 </div>
               </div>
             )}
+          </section>
+        </div>
+      )}
+
+      {isGitImportOpen && (
+        <div
+          className="agents-preview-backdrop"
+          onClick={() => { if (!isImporting) setIsGitImportOpen(false); }}
+        >
+          <section
+            className="agents-preview-panel card"
+            style={{ width: 'min(560px, calc(100vw - 40px))' }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Git 导入 Agent"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="flex-between agents-preview-head">
+              <div>
+                <div className="card-header" style={{ marginBottom: 2 }}>Git 导入 Agent</div>
+                <div className="agents-preview-subtitle">从公开 HTTPS 仓库创建 Agent 模板 seed</div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => setIsGitImportOpen(false)}
+                disabled={isImporting}
+              >
+                关闭
+              </button>
+            </div>
+
+            <form className="agents-preview-body" onSubmit={handleImportGit}>
+              <div>
+                <label htmlFor="agent-git-import-url">仓库 URL</label>
+                <input
+                  id="agent-git-import-url"
+                  value={gitImportUrl}
+                  onChange={event => setGitImportUrl(event.target.value)}
+                  placeholder="https://github.com/org/repo.git"
+                  autoFocus
+                  disabled={isImporting}
+                />
+              </div>
+              <div>
+                <label htmlFor="agent-git-import-ref">Branch / Tag / Ref</label>
+                <input
+                  id="agent-git-import-ref"
+                  value={gitImportRef}
+                  onChange={event => setGitImportRef(event.target.value)}
+                  placeholder="main"
+                  disabled={isImporting}
+                />
+              </div>
+              <div className="agents-preview-notes">
+                仅支持公开 https:// 仓库；token、SSH、私有仓库凭据留到后续版本。
+              </div>
+              <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setIsGitImportOpen(false)}
+                  disabled={isImporting}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={isImporting || !gitImportUrl.trim()}
+                >
+                  <LineIcon name="radio" />
+                  {isImporting ? '导入中...' : '开始导入'}
+                </button>
+              </div>
+            </form>
           </section>
         </div>
       )}

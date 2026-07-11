@@ -138,7 +138,7 @@ async function main() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: 'Agent Import Smoke',
-        email: `agent-import-${stamp}@example.test`,
+        email: `agent-import-${stamp}@gmail.com`,
         password: 'test-password-123',
       }),
     }));
@@ -195,11 +195,22 @@ async function main() {
       headers: authHeaders,
       body: badForm,
     });
+    const badGitUrl = await fetchJson(`${baseUrl}/api/agents/import/git`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'http://127.0.0.1/repo.git' }),
+    });
+    const badGitRef = await fetchJson(`${baseUrl}/api/agents/import/git`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://github.com/example/repo.git', ref: 'main;rm-rf' }),
+    });
 
     const mcpPath = path.join(seedDir, '.mcp.json');
     const mcpServers = fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers : {};
     const preDeleteChecks = {
       templateCreated: Boolean(template.id && storedTemplate?.seedDir),
+      popularityDefaulted: storedTemplate?.popularity?.runCount === 0,
       strippedTopDir: fs.existsSync(path.join(seedDir, 'CLAUDE.md')) && !fs.existsSync(path.join(seedDir, 'cc-project')),
       settingsDisabled: fs.existsSync(path.join(seedDir, '.claude', 'settings.json.imported')) && !fs.existsSync(path.join(seedDir, '.claude', 'settings.json')),
       mcpSanitized: Boolean(mcpServers.remoteSearch && !mcpServers.localTool),
@@ -211,6 +222,8 @@ async function main() {
       reportDisabled: report.disabled.hooks.includes('PreToolUse') && report.disabled.stdioMcp.includes('localTool'),
       previewUsesSeed: preview.cwdSource === 'template_seed' && preview.effectiveContent.includes(`root marker ${stamp}`),
       traversalRejected: bad.response.status >= 400,
+      gitUrlValidationRejected: badGitUrl.response.status >= 400,
+      gitRefValidationRejected: badGitRef.response.status >= 400,
     };
 
     await requireOk('delete imported agent', fetchJson(`${baseUrl}/api/agents`, {

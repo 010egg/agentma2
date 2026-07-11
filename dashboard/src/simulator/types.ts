@@ -421,6 +421,11 @@ export interface AgentTemplate {
   visualPreprocessModel?: string;
   // 导入本地 Claude Code 项目时生成的模板级 seed 仓路径。
   seedDir?: string;
+  // Agent 市场热度：同一租户内跨账户累计使用次数。
+  popularity?: {
+    runCount: number;
+    lastRunAt: number | null;
+  };
   createdBy?: string | null;
   publishedAt?: number | null;
   archivedAt?: number | null;

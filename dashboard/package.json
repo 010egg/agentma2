@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "server": "tsx server.ts",
+    "smoke:a2a-sdk": "node scripts/smoke-a2a-sdk.mjs",
+    "smoke:a2a-credentials": "tsx scripts/smoke-a2a-credentials.mjs",
     "smoke:chat-collaboration": "node scripts/smoke-chat-collaboration.mjs",
     "smoke:chat-resume": "node scripts/smoke-chat-resume.mjs",
     "smoke:chat-ask-user-question": "node scripts/smoke-chat-ask-user-question.mjs",
@@ -28,6 +30,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.0.0-beta.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.156",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",

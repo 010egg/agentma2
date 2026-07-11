@@ -389,6 +389,20 @@ export default function Conversations() {
     });
   }, [cacheSessions]);
 
+  const refreshAgentTemplates = useCallback(() => {
+    const tenantId = user?.tenantId;
+    if (!tenantId) return;
+    void (async () => {
+      try {
+        const bootstrapped = await bootstrapAgentTemplates(tenantId, user.role === 'tenant_admin');
+        const list = await ensureVizAgentTemplate(tenantId, bootstrapped);
+        setTemplates(list);
+      } catch (error) {
+        console.error('failed to refresh agent templates', error);
+      }
+    })();
+  }, [user?.tenantId, user?.role]);
+
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
@@ -783,6 +797,7 @@ export default function Conversations() {
               } else {
                 await persistFinalMessage(content || (cachedErrorMessage ? `错误: ${cachedErrorMessage}` : ''), finalOutcome, d.sdkSessionId, d.sdkCwd, finalDetail);
               }
+              refreshAgentTemplates();
             } else if (d.type === 'run_outcome') {
               receivedOutcome = normalizeRunOutcome(d.outcome, receivedOutcome || 'provider_error');
               outcomeDetail = typeof d.subtype === 'string'
@@ -867,6 +882,7 @@ export default function Conversations() {
     selectedModel,
     sessions,
     setSessionMessages,
+    refreshAgentTemplates,
     updateSessionRunPhase,
   ]);
 
@@ -1736,6 +1752,7 @@ export default function Conversations() {
               } else {
                 await persistFinalMessage(finalContent || (cachedErrorMessage ? `错误: ${cachedErrorMessage}` : ''), finalOutcome, data.sdkSessionId, data.sdkCwd, finalDetail);
               }
+              refreshAgentTemplates();
             } else if (data.type === 'run_outcome') {
               receivedOutcome = normalizeRunOutcome(data.outcome, receivedOutcome || 'provider_error');
               outcomeDetail = typeof data.subtype === 'string'
@@ -1827,6 +1844,7 @@ export default function Conversations() {
     beginSessionRun,
     finishSessionRun,
     patchSessionRunUi,
+    refreshAgentTemplates,
     setSessionMessages,
     updateSessionRunPhase,
     nextSuggestion,
