@@ -7,6 +7,7 @@
     "dev": "vite",
     "server": "tsx server.ts",
     "smoke:a2a-sdk": "node scripts/smoke-a2a-sdk.mjs",
+    "smoke:a2a-credentials": "tsx scripts/smoke-a2a-credentials.mjs",
     "smoke:chat-collaboration": "node scripts/smoke-chat-collaboration.mjs",
     "smoke:chat-resume": "node scripts/smoke-chat-resume.mjs",
     "smoke:chat-ask-user-question": "node scripts/smoke-chat-ask-user-question.mjs",

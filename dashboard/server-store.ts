@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import bcrypt from 'bcryptjs';
+import { getCredentialCipher } from './server-credentials.ts';
 import {
   agentRunOutcomeIsFailure,
   normalizeChatMessageStatus,
@@ -156,6 +157,15 @@ export type ApiKeyRow = {
   revokedAt: number | null;
   lastUsedAt: number | null;
   expiresAt: number | null;
+};
+
+export type A2ACredentialRow = {
+  id: string;
+  tenantId: string;
+  name: string;
+  createdBy: string | null;
+  createdAt: number;
+  rotatedAt: number | null;
 };
 
 export type TeamRow = {
@@ -609,6 +619,17 @@ function initSchema() {
       expires_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON api_keys (tenant_id);
+
+    CREATE TABLE IF NOT EXISTS a2a_credentials (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      secret_ciphertext TEXT NOT NULL,
+      created_by TEXT REFERENCES users(email) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL,
+      rotated_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_a2a_credentials_tenant_id ON a2a_credentials (tenant_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS quotas (
       tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
@@ -2328,6 +2349,79 @@ export function revokeApiKey(tenantId: string, id: string) {
     WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL
   `).run(now(), id, tenantId);
   return result.changes > 0;
+}
+
+function mapA2ACredential(row: any): A2ACredentialRow {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    name: String(row.name),
+    createdBy: row.created_by ? String(row.created_by) : null,
+    createdAt: Number(row.created_at),
+    rotatedAt: row.rotated_at == null ? null : Number(row.rotated_at),
+  };
+}
+
+export function listA2ACredentials(tenantId: string): A2ACredentialRow[] {
+  return (db.prepare(`
+    SELECT id, tenant_id, name, created_by, created_at, rotated_at
+    FROM a2a_credentials
+    WHERE tenant_id = ?
+    ORDER BY created_at DESC
+  `).all(tenantId) as any[]).map(mapA2ACredential);
+}
+
+export function createA2ACredential(tenantId: string, createdBy: string | null, name: string, secret: string) {
+  const row: A2ACredentialRow = {
+    id: crypto.randomUUID(),
+    tenantId,
+    name: name.trim(),
+    createdBy,
+    createdAt: now(),
+    rotatedAt: null,
+  };
+  db.prepare(`
+    INSERT INTO a2a_credentials (id, tenant_id, name, secret_ciphertext, created_by, created_at, rotated_at)
+    VALUES (?, ?, ?, ?, ?, ?, NULL)
+  `).run(row.id, tenantId, row.name, getCredentialCipher().encrypt(secret), createdBy, row.createdAt);
+  audit(tenantId, 'create_a2a_credential', createdBy || 'system', 'user', `a2a-credential:${row.id}`);
+  return row;
+}
+
+export function rotateA2ACredential(tenantId: string, id: string, actor: string, secret: string) {
+  const rotatedAt = now();
+  const result = db.prepare(`
+    UPDATE a2a_credentials
+    SET secret_ciphertext = ?, rotated_at = ?
+    WHERE id = ? AND tenant_id = ?
+  `).run(getCredentialCipher().encrypt(secret), rotatedAt, id, tenantId);
+  if (!result.changes) return null;
+  audit(tenantId, 'rotate_a2a_credential', actor, 'user', `a2a-credential:${id}`);
+  return listA2ACredentials(tenantId).find((item) => item.id === id) || null;
+}
+
+function templateReferencesA2ACredential(tenantId: string, credentialId: string) {
+  const rows = db.prepare('SELECT data_json FROM agent_templates WHERE tenant_id = ?').all(tenantId) as Array<{ data_json: string }>;
+  return rows.some(({ data_json }) => {
+    const template = parseAgentTemplateJson(data_json);
+    if (!template || isDeletedAgentTemplate(template) || !Array.isArray(template.a2aRemoteAgents)) return false;
+    return template.a2aRemoteAgents.some((remote: any) => remote?.credentialRef === credentialId);
+  });
+}
+
+export function deleteA2ACredential(tenantId: string, id: string, actor: string) {
+  if (templateReferencesA2ACredential(tenantId, id)) return { ok: false as const, reason: 'in_use' as const };
+  const result = db.prepare('DELETE FROM a2a_credentials WHERE id = ? AND tenant_id = ?').run(id, tenantId);
+  if (!result.changes) return { ok: false as const, reason: 'not_found' as const };
+  audit(tenantId, 'delete_a2a_credential', actor, 'user', `a2a-credential:${id}`);
+  return { ok: true as const };
+}
+
+export function resolveA2ACredential(tenantId: string, id: string) {
+  const row = db.prepare(`
+    SELECT secret_ciphertext FROM a2a_credentials WHERE id = ? AND tenant_id = ?
+  `).get(id, tenantId) as { secret_ciphertext: string } | undefined;
+  return row ? getCredentialCipher().decrypt(row.secret_ciphertext) : null;
 }
 
 export function getQuota(tenantId: string) {

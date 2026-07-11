@@ -45,6 +45,15 @@ npm run dev
 - `AGENTMA_SANDBOX_NETWORK_MANAGED_ONLY`：默认关闭；设为 `1` 后只允许 managed domains 网络策略，需先验证 WebFetch/远程 MCP/npx。
 - `AGENTMA_RUN_ENV_ALLOWLIST`：逗号分隔追加传入 agent run 的环境变量名。默认仅传 `PATH,LANG,LC_ALL,LC_CTYPE,TZ,TERM,TMPDIR,SHELL`，再注入本次 provider 的 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`。
 
+## A2A 远程凭据主密钥
+
+A2A 远程 Agent 的 Bearer 凭据使用 AES-256-GCM 加密后写入 SQLite。主密钥按以下顺序加载：
+
+- `AGENTMA_A2A_CREDENTIAL_KEY`：base64 编码的 32 字节密钥。
+- 未配置环境变量时，自动创建 `~/Library/Application Support/agentma2/a2a-credential-key`，权限为 `0600`。
+
+备份数据库时必须同时备份该主密钥文件。主密钥丢失后，已有远程凭据无法恢复；密钥和数据库也不应存放在同一个公开备份中。
+
 ## 构建
 
 仅构建前端静态资源：
