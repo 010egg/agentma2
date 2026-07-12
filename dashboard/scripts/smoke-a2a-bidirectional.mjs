@@ -10,6 +10,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentma-a2a-bidirectional-'));
 process.env.AGENTMA_DATA_DIR = dataDir;
 process.env.AGENTMA_A2A_ALLOW_LOOPBACK_HTTP = '1';
+process.env.AGENTMA_A2A_REMOTE_POLL_INTERVAL_MS = '200';
+process.env.AGENTMA_A2A_REMOTE_TASK_TIMEOUT_MS = '10000';
 let server;
 let mcpClient;
 let mcpServerInstance;
@@ -31,6 +33,10 @@ try {
   let baseUrl = '';
   let cancelCount = 0;
   let sawSecret = false;
+  let allSendMessagesReturnImmediately = true;
+  let allGetTasksOmitHistory = true;
+  let completedTaskPolls = 0;
+  let inputTaskPolls = 0;
   const app = express();
   app.use(express.json());
   app.get('/card', (_req, res) => res.json({
@@ -48,6 +54,9 @@ try {
   app.post('/rpc', (req, res) => {
     sawSecret ||= req.header('authorization') === `Bearer ${secret}`;
     const { method, id, params } = req.body || {};
+    if (method === 'SendMessage') {
+      allSendMessagesReturnImmediately &&= params?.configuration?.returnImmediately === true;
+    }
     if (method === 'SendMessage' && params?.message?.parts?.[0]?.text === 'echo-secret') {
       res.json({ jsonrpc: '2.0', id, result: { task: {
         id: 'remote-echo-task', contextId: 'remote-context',
@@ -61,6 +70,40 @@ try {
       return;
     }
     if (method === 'GetTask') {
+      if (params?.id !== 'agentma-probe') allGetTasksOmitHistory &&= params?.historyLength === 0;
+      if (params?.id === 'remote-complete-task') {
+        completedTaskPolls += 1;
+        if (completedTaskPolls < 3) {
+          res.json({ jsonrpc: '2.0', id, result: {
+            id: params.id, contextId: 'remote-context',
+            status: { state: 'TASK_STATE_WORKING' }, artifacts: [], history: [],
+          } });
+          return;
+        }
+        res.json({ jsonrpc: '2.0', id, result: {
+          id: params.id, contextId: 'remote-context',
+          status: { state: 'TASK_STATE_COMPLETED', message: { parts: [{ text: 'remote-done' }] } },
+          artifacts: [{ artifactId: 'structured', name: 'structured-output', parts: [{ data: { ok: true } }] }],
+          history: [],
+        } });
+        return;
+      }
+      if (params?.id === 'remote-input-task') {
+        inputTaskPolls += 1;
+        res.json({ jsonrpc: '2.0', id, result: {
+          id: params.id, contextId: 'remote-context',
+          status: { state: 'TASK_STATE_COMPLETED', message: { parts: [{ text: 'remote-input-done' }] } },
+          artifacts: [], history: [],
+        } });
+        return;
+      }
+      if (params?.id === 'remote-timeout-task' || params?.id === 'remote-abort-task') {
+        res.json({ jsonrpc: '2.0', id, result: {
+          id: params.id, contextId: 'remote-context',
+          status: { state: 'TASK_STATE_WORKING' }, artifacts: [], history: [],
+        } });
+        return;
+      }
       res.json({ jsonrpc: '2.0', id, error: { code: -32001, message: 'Task not found' } });
       return;
     }
@@ -80,10 +123,31 @@ try {
       } } });
       return;
     }
+    if (continuation) {
+      res.json({ jsonrpc: '2.0', id, result: { task: {
+        id: continuation, contextId: 'remote-context',
+        status: { state: 'TASK_STATE_WORKING' }, artifacts: [], history: [],
+      } } });
+      return;
+    }
+    if (inputText === 'never-done') {
+      res.json({ jsonrpc: '2.0', id, result: { task: {
+        id: 'remote-timeout-task', contextId: 'remote-context',
+        status: { state: 'TASK_STATE_SUBMITTED' }, artifacts: [], history: [],
+      } } });
+      return;
+    }
+    if (inputText === 'abort-working') {
+      res.json({ jsonrpc: '2.0', id, result: { task: {
+        id: 'remote-abort-task', contextId: 'remote-context',
+        status: { state: 'TASK_STATE_SUBMITTED' }, artifacts: [], history: [],
+      } } });
+      return;
+    }
     res.json({ jsonrpc: '2.0', id, result: { task: {
-      id: continuation || 'remote-complete-task', contextId: 'remote-context',
-      status: { state: 'TASK_STATE_COMPLETED', message: { parts: [{ text: 'remote-done' }] } },
-      artifacts: [{ artifactId: 'structured', name: 'structured-output', parts: [{ data: { ok: true } }] }],
+      id: 'remote-complete-task', contextId: 'remote-context',
+      status: { state: 'TASK_STATE_SUBMITTED' },
+      artifacts: [],
       history: [],
     } } });
   });
@@ -109,10 +173,14 @@ try {
   assert.equal(descriptors[0].sdkToolName, `mcp__a2a__${chineseToolName}`);
 
   const completed = await callA2ARemote(registration.tenantId, config, { text: 'hello' });
+  assert.match(completed, /"task"/);
   assert.match(completed, /remote-done/);
   assert.match(completed, /structured-output/);
   assert(!completed.includes(secret));
   assert.equal(sawSecret, true);
+  assert.equal(allSendMessagesReturnImmediately, true);
+  assert.equal(completedTaskPolls >= 3, true);
+  assert.equal(allGetTasksOmitHistory, true);
 
   const echoed = await callA2ARemote(registration.tenantId, config, { text: 'echo-secret' });
   assert(!echoed.includes(secret));
@@ -135,8 +203,10 @@ try {
   );
   assert.match(continued, /TASK_STATE_COMPLETED/);
   assert.match(continued, /remote-input-task/);
+  assert.equal(inputTaskPolls >= 1, true);
 
   const abortController = new AbortController();
+  const cancelCountBeforeInputAbort = cancelCount;
   const canceledCall = callA2ARemote(
     registration.tenantId,
     config,
@@ -149,7 +219,29 @@ try {
   setTimeout(() => abortController.abort(), 25);
   await assert.rejects(canceledCall, /aborted/);
   await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(cancelCount, 1);
+  assert.equal(cancelCount, cancelCountBeforeInputAbort + 1);
+
+  const workingAbortController = new AbortController();
+  const cancelCountBeforeWorkingAbort = cancelCount;
+  const workingCanceledCall = callA2ARemote(
+    registration.tenantId,
+    config,
+    { text: 'abort-working' },
+    undefined,
+    workingAbortController.signal,
+  );
+  setTimeout(() => workingAbortController.abort(), 25);
+  await assert.rejects(workingCanceledCall, /aborted/);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(cancelCount, cancelCountBeforeWorkingAbort + 1);
+
+  const cancelCountBeforeTimeout = cancelCount;
+  await assert.rejects(
+    () => callA2ARemote(registration.tenantId, config, { text: 'never-done' }),
+    /timed out/,
+  );
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(cancelCount, cancelCountBeforeTimeout + 1);
 
   const a2aLogs = [];
   const mcp = buildA2ARemoteMcp(registration.tenantId, [{ ...config, name: '中文研究员' }], {
@@ -191,7 +283,8 @@ try {
     checks: [
       'card', 'card-discovery', 'chinese-tool-name', 'credential', 'completed', 'structured-artifact', 'input-required', 'cancel',
       'credential-redaction', 'oversized-remote-event', 'no-secret-leak', 'mcp-runtime-logs', 'chat-runtime-wiring',
-      'template-a2a-authorization',
+      'template-a2a-authorization', 'async-submit', 'task-polling', 'poll-history-limit', 'resume-polling',
+      'working-abort-cancel', 'task-timeout-cancel',
     ],
   }));
 } finally {

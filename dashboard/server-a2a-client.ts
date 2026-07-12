@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { guardedFetch } from './server-outbound-url.ts';
+import { guardedFetch, OutboundRequestError } from './server-outbound-url.ts';
 import { resolveA2ACredential } from './server-store.ts';
 
 export type A2ARemoteConfig = { name: string; agentCardUrl: string; credentialRef?: string };
@@ -21,6 +21,15 @@ export type A2ARemoteToolDescriptor = {
 const CARD_TTL_MS = 5 * 60 * 1000;
 const CARD_MAX_BYTES = 256 * 1024;
 const RPC_MAX_BYTES = 2 * 1024 * 1024;
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_TASK_TIMEOUT_MS = 15 * 60_000;
+const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+const TERMINAL_TASK_STATES = new Set([
+  'TASK_STATE_COMPLETED',
+  'TASK_STATE_FAILED',
+  'TASK_STATE_CANCELED',
+  'TASK_STATE_REJECTED',
+]);
 const cache = new Map<string, {
   expiresAt: number;
   name: string;
@@ -30,6 +39,54 @@ const cache = new Map<string, {
 
 function allowLoopbackHttp() {
   return process.env.AGENTMA_A2A_ALLOW_LOOPBACK_HTTP === '1';
+}
+
+function boundedEnv(name: string, fallback: number, min: number, max: number) {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function pollIntervalMs() {
+  return boundedEnv('AGENTMA_A2A_REMOTE_POLL_INTERVAL_MS', DEFAULT_POLL_INTERVAL_MS, 200, 30_000);
+}
+
+function taskTimeoutMs() {
+  return boundedEnv('AGENTMA_A2A_REMOTE_TASK_TIMEOUT_MS', DEFAULT_TASK_TIMEOUT_MS, 10_000, 2 * 60 * 60_000);
+}
+
+function taskState(task: unknown) {
+  if (!task || typeof task !== 'object') return '';
+  const status = (task as Record<string, unknown>).status;
+  if (!status || typeof status !== 'object') return '';
+  const state = (status as Record<string, unknown>).state;
+  return typeof state === 'string' ? state : '';
+}
+
+function isActionableTaskState(state: string) {
+  return TERMINAL_TASK_STATES.has(state) || state === 'TASK_STATE_INPUT_REQUIRED';
+}
+
+function abortError() {
+  return Object.assign(new Error('aborted'), { name: 'AbortError' });
+}
+
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function cleanCardText(value: unknown, fallback: string, maxLength: number) {
@@ -134,7 +191,7 @@ async function rpcCall(rpcUrl: string, credential: string | null, method: string
   const response = await guardedFetch(rpcUrl, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json', Accept: 'application/json', 'A2A-Version': '1.0',
+      'Content-Type': 'application/json', Accept: 'application/json', 'A2A-Version': '1.0', Connection: 'close',
       ...(credential ? { Authorization: `Bearer ${credential}` } : {}),
     },
     body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomUUID(), method, params }),
@@ -149,6 +206,28 @@ async function rpcCall(rpcUrl: string, credential: string | null, method: string
     throw new Error(`Remote A2A error: ${message}`);
   }
   return payload?.result;
+}
+
+async function pollTask(
+  rpcUrl: string,
+  credential: string | null,
+  taskId: string,
+  deadline: number,
+  signal?: AbortSignal,
+) {
+  let failures = 0;
+  while (true) {
+    if (Date.now() > deadline) throw new Error('Remote Agent task timed out.');
+    await sleep(pollIntervalMs(), signal);
+    if (Date.now() > deadline) throw new Error('Remote Agent task timed out.');
+    try {
+      const task = await rpcCall(rpcUrl, credential, 'GetTask', { id: taskId, historyLength: 0 }, signal);
+      failures = 0;
+      if (isActionableTaskState(taskState(task))) return task;
+    } catch (error) {
+      if (!(error instanceof OutboundRequestError) || ++failures >= MAX_CONSECUTIVE_POLL_FAILURES) throw error;
+    }
+  }
 }
 
 function inputDescriptor(task: Record<string, unknown>) {
@@ -195,11 +274,14 @@ export async function callA2ARemote(
   const credential = config.credentialRef ? resolveA2ACredential(tenantId, config.credentialRef) : null;
   if (config.credentialRef && !credential) throw new Error('Remote Agent credential is unavailable.');
   const parts = input.data !== undefined ? [{ data: input.data }] : [{ text: String(input.text || '').slice(0, 64 * 1024) }];
+  const deadline = Date.now() + taskTimeoutMs();
   let result = await rpcCall(rpcUrl, credential, 'SendMessage', {
     message: { messageId: crypto.randomUUID(), role: 'ROLE_USER', parts },
-    configuration: { acceptedOutputModes: ['text/plain', 'application/json'], returnImmediately: false },
+    configuration: { acceptedOutputModes: ['text/plain', 'application/json'], returnImmediately: true },
   }, signal);
+  if (result?.message) return resultText(result, credential);
   let task = result?.task;
+  if (!task?.id) return resultText(result, credential);
   let remoteTaskId = task?.id;
   const cancel = () => {
     if (!remoteTaskId) return;
@@ -207,20 +289,33 @@ export async function callA2ARemote(
   };
   signal?.addEventListener('abort', cancel, { once: true });
   try {
-    for (let turn = 0; task?.status?.state === 'TASK_STATE_INPUT_REQUIRED' && turn < 8; turn += 1) {
+    let turn = 0;
+    while (true) {
+      let state = taskState(task);
+      if (!isActionableTaskState(state)) {
+        task = await pollTask(rpcUrl, credential, remoteTaskId, deadline, signal);
+        state = taskState(task);
+      }
+      if (TERMINAL_TASK_STATES.has(state)) break;
+      if (state !== 'TASK_STATE_INPUT_REQUIRED') continue;
+      if (turn >= 8) throw new Error('Remote Agent exceeded the additional input limit.');
       if (!requester) throw new Error('Remote Agent requires additional input.');
+      turn += 1;
       const continuation = await continuationFor(task as Record<string, unknown>, requester, signal);
       result = await rpcCall(rpcUrl, credential, 'SendMessage', {
         message: {
           messageId: crypto.randomUUID(), taskId: task.id, contextId: task.contextId,
           role: 'ROLE_USER', parts: [{ data: continuation }],
         },
-        configuration: { acceptedOutputModes: ['text/plain', 'application/json'], returnImmediately: false },
+        configuration: { acceptedOutputModes: ['text/plain', 'application/json'], returnImmediately: true },
       }, signal);
-      task = result?.task;
+      task = result?.task ?? task;
       remoteTaskId = task?.id || remoteTaskId;
     }
-    return resultText(result, credential);
+    return resultText({ task }, credential);
+  } catch (error) {
+    if ((error as Error)?.message === 'Remote Agent task timed out.') cancel();
+    throw error;
   } finally {
     signal?.removeEventListener('abort', cancel);
   }
