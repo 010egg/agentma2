@@ -56,6 +56,8 @@ RPC 请求必须同时发送 `Authorization: Bearer <AgentMa API Key>`、`A2A-Ve
 
 模板也可配置最多 16 个远程 A2A Agent。运行时它们会作为受限 MCP 工具注入，远程 Card/RPC 只支持 A2A 1.0 JSON-RPC，并统一经过下述出站 URL 防护。
 
+在 Agent 编辑器中添加远程 Agent 时只需填写 Card URL；系统会安全读取 Card 名称并自动填充。名称是可选的本地别名，支持中文，并会转换为稳定、符合工具协议限制的内部名称。
+
 部署相关环境变量：
 
 - `AGENTMA_PUBLIC_URL`：对外可访问的站点根 URL，用于生成 Card 中的绝对 RPC URL。

@@ -177,21 +177,25 @@ async function main() {
       publishedAt: Date.now(),
       a2aPublished: true,
       a2aRemoteAgents: [{
-        name: 'Research Partner',
+        name: '中文研究员',
         agentCardUrl: 'https://example.com/.well-known/agent-card.json',
         credentialRef: credential.id,
         secret: 'strip-this-field',
       }],
     });
     const legacy = template('a2a-legacy', 'Legacy Agent');
+    const urlOnly = template('a2a-url-only', 'URL Only Agent', {
+      a2aRemoteAgents: [{ agentCardUrl: 'https://url-only.example/.well-known/agent-card.json' }],
+    });
     await requireOk('save configured templates', fetchJson(`${baseUrl}/api/agents`, {
       method: 'PUT',
       headers: adminHeaders,
-      body: JSON.stringify([configured, legacy]),
+      body: JSON.stringify([configured, legacy, urlOnly]),
     }));
     const adminList = await requireOk('list normalized templates', fetchJson(`${baseUrl}/api/agents`, { headers: adminHeaders }));
     const storedConfigured = adminList.find(item => item.id === configured.id);
     const storedLegacy = adminList.find(item => item.id === legacy.id);
+    const storedUrlOnly = adminList.find(item => item.id === urlOnly.id);
 
     const tampered = {
       ...storedConfigured,
@@ -274,8 +278,10 @@ async function main() {
     const checks = {
       legacyDefaults: storedLegacy?.a2aPublished === false && Array.isArray(storedLegacy?.a2aRemoteAgents) && storedLegacy.a2aRemoteAgents.length === 0,
       configuredRoundTrip: storedConfigured?.a2aPublished === true
+        && storedConfigured?.a2aRemoteAgents?.[0]?.name === '中文研究员'
         && storedConfigured?.a2aRemoteAgents?.[0]?.credentialRef === credential.id
         && !('secret' in storedConfigured.a2aRemoteAgents[0]),
+      urlOnlyNameDefaulted: storedUrlOnly?.a2aRemoteAgents?.[0]?.name === 'url-only.example',
       credentialOptionsForManager: memberOptions.some(item => item.id === credential.id && item.name === credential.name),
       noCredentialLeak: !apiPayload.includes(credentialSecret) && !apiPayload.includes('secret_ciphertext'),
       unauthorizedChangeIgnored: protectedConfigured?.a2aPublished === true && protectedConfigured?.a2aRemoteAgents?.length === 1,

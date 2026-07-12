@@ -139,6 +139,7 @@ try {
       PORT: String(port),
       AGENTMA_DATA_DIR: dataDir,
       AGENTMA_PUBLIC_URL: baseUrl,
+      AGENTMA_A2A_ALLOW_LOOPBACK_HTTP: '1',
       AGENTMA_SKIP_RECOVER: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -193,6 +194,13 @@ try {
     assert(!serializedCard.includes(secret), `Agent Card leaked ${secret}`);
   }
   assert.equal(await conditionalGetStatus(cardUrl, etag), 304);
+
+  const discoveredCard = await requireOk('discover local card', fetchJson(
+    `${baseUrl}/api/a2a/discover?url=${encodeURIComponent(cardUrl)}`,
+    { headers: bearer(admin.token) },
+  ));
+  assert.equal(discoveredCard.name, agent.name);
+  assert.equal(discoveredCard.rpcUrl, `${baseUrl}/a2a/agents/${agent.id}/rpc`);
 
   const missingVersion = await fetchJson(`${baseUrl}/a2a/agents/${agent.id}/rpc`, {
     method: 'POST',
@@ -376,7 +384,8 @@ try {
     ok: true,
     checks: [
       'public-card', 'card-redaction', 'etag', 'api-key-only', 'version', 'content-type',
-      'json-rpc-errors', 'oversized-message', 'official-client', 'persisted-get-list-cancel', 'caller-isolation',
+      'card-discovery-api', 'json-rpc-errors', 'oversized-message', 'official-client',
+      'persisted-get-list-cancel', 'caller-isolation',
       'tenant-isolation', 'ambiguous-card',
     ],
   }));

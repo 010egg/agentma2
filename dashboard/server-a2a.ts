@@ -35,6 +35,7 @@ import {
   a2aExecutionManager,
   a2aTaskToProtocol,
 } from './server-a2a-executor.ts';
+import { discoverA2ARemoteAgent } from './server-a2a-client.ts';
 import {
   authenticateToken,
   findUniquePublishedA2AAgentTemplate,
@@ -306,6 +307,39 @@ export function mountA2ARoutes(
   options: { executionManager?: A2AExecutionManager } = {},
 ) {
   const executionManager = options.executionManager || a2aExecutionManager;
+  app.use('/api/a2a/discover', async (req, res) => {
+    if (req.method !== 'GET') {
+      res.setHeader('Allow', 'GET');
+      res.status(405).json({ error: 'method not allowed' });
+      return;
+    }
+    const auth = authenticateToken(bearerToken(req));
+    if (!auth) {
+      res.status(401).json({ error: '请先登录' });
+      return;
+    }
+    if (auth.authType !== 'jwt') {
+      res.status(403).json({ error: 'API Key 无法使用 Agent 编辑器发现接口' });
+      return;
+    }
+    const agentCardUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    if (!agentCardUrl) {
+      res.status(400).json({ error: 'Agent Card URL 不能为空' });
+      return;
+    }
+    if (Buffer.byteLength(agentCardUrl, 'utf8') > 2048) {
+      res.status(400).json({ error: 'Agent Card URL 不能超过 2048 字节' });
+      return;
+    }
+    try {
+      const discovered = await discoverA2ARemoteAgent(auth.tenantId, agentCardUrl);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(discovered);
+    } catch (error) {
+      res.status(400).json({ error: ((error as Error).message || '无法读取 Agent Card').slice(0, 300) });
+    }
+  });
+
   app.use('/a2a/agents/:templateId/.well-known/agent-card.json', (req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD');

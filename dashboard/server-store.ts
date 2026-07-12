@@ -4463,18 +4463,6 @@ function normalizeStoredA2ARemoteAgents(tenantId: string, value: unknown) {
       throw agentTemplateValidationError(`a2aRemoteAgents[${index}] must be an object`);
     }
     const raw = item as Record<string, unknown>;
-    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
-    const hasControlCharacter = Array.from(name).some((character) => {
-      const code = character.charCodeAt(0);
-      return code <= 0x1f || code === 0x7f;
-    });
-    if (!name || name.length > MAX_A2A_REMOTE_NAME_LENGTH || hasControlCharacter) {
-      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].name must be 1-${MAX_A2A_REMOTE_NAME_LENGTH} printable characters`);
-    }
-    const nameKey = name.toLocaleLowerCase('en-US');
-    if (seenNames.has(nameKey)) throw agentTemplateValidationError(`duplicate A2A remote Agent name: ${name}`);
-    seenNames.add(nameKey);
-
     const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
     if (!agentCardUrl || Buffer.byteLength(agentCardUrl, 'utf8') > MAX_A2A_CARD_URL_BYTES) {
       throw agentTemplateValidationError(`a2aRemoteAgents[${index}].agentCardUrl is required and must not exceed ${MAX_A2A_CARD_URL_BYTES} bytes`);
@@ -4494,6 +4482,24 @@ function normalizeStoredA2ARemoteAgents(tenantId: string, value: unknown) {
     if (!allowedProtocol) {
       throw agentTemplateValidationError('A2A Agent Card URLs must use HTTPS; loopback HTTP requires AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1');
     }
+
+    const suppliedName = typeof raw.name === 'string' ? raw.name.trim() : '';
+    const hasControlCharacter = Array.from(suppliedName).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+    if (suppliedName.length > MAX_A2A_REMOTE_NAME_LENGTH || hasControlCharacter) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].name must not exceed ${MAX_A2A_REMOTE_NAME_LENGTH} printable characters`);
+    }
+    let name = suppliedName || parsedUrl.hostname.slice(0, MAX_A2A_REMOTE_NAME_LENGTH) || `Remote Agent ${index + 1}`;
+    let nameKey = name.toLocaleLowerCase('en-US');
+    if (!suppliedName && seenNames.has(nameKey)) {
+      const suffix = crypto.createHash('sha256').update(`${agentCardUrl}\0${index}`).digest('hex').slice(0, 6);
+      name = `${name.slice(0, MAX_A2A_REMOTE_NAME_LENGTH - suffix.length - 1)}-${suffix}`;
+      nameKey = name.toLocaleLowerCase('en-US');
+    }
+    if (seenNames.has(nameKey)) throw agentTemplateValidationError(`duplicate A2A remote Agent name: ${name}`);
+    seenNames.add(nameKey);
 
     const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
     if (credentialRef && !credentialIds.has(credentialRef)) {

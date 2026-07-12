@@ -485,7 +485,7 @@ Content-Type: application/json
 }
 ```
 
-每个模板最多配置 16 个远程 Agent，名称在模板内不区分大小写唯一。生产 Card URL 必须为 HTTPS，且不得在 URL 中嵌入用户名或密码。`AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1` 只为本地开发允许 loopback HTTP；Card 和选出的 RPC URL 仍会经过 DNS、地址固定、重定向、字节和超时限制。
+每个模板最多配置 16 个远程 Agent。`name` 是可选的本地别名：编辑器会通过 `GET /api/a2a/discover?url=...` 安全读取 Card 名称并自动填充；留空保存时服务端会根据 URL 生成稳定名称。别名支持中文，在模板内不区分大小写唯一，运行时会转换为符合工具协议限制的稳定 ASCII 工具名。生产 Card URL 必须为 HTTPS，且不得在 URL 中嵌入用户名或密码。`AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1` 只为本地开发允许 loopback HTTP；Card 和选出的 RPC URL 仍会经过 DNS、地址固定、重定向、字节和超时限制。
 
 ### A2A 远程凭据
 

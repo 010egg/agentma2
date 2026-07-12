@@ -475,9 +475,9 @@ export default function Agents() {
       setError('每个 Agent 最多配置 16 个远程 A2A Agent');
       return;
     }
-    const incompleteRemoteIndex = normalizedA2ARemotes.findIndex(remote => !remote.name || !remote.agentCardUrl);
+    const incompleteRemoteIndex = normalizedA2ARemotes.findIndex(remote => !remote.agentCardUrl);
     if (incompleteRemoteIndex >= 0) {
-      setError(`远程 A2A Agent 第 ${incompleteRemoteIndex + 1} 行需要名称和 Agent Card URL`);
+      setError(`远程 A2A Agent 第 ${incompleteRemoteIndex + 1} 行需要 Agent Card URL`);
       return;
     }
     const invalidRemoteUrlIndex = normalizedA2ARemotes.findIndex((remote) => {
@@ -487,7 +487,9 @@ export default function Agents() {
       setError(`远程 A2A Agent 第 ${invalidRemoteUrlIndex + 1} 行的 Agent Card URL 无效`);
       return;
     }
-    const remoteNameKeys = normalizedA2ARemotes.map(remote => remote.name.toLocaleLowerCase('en-US'));
+    const remoteNameKeys = normalizedA2ARemotes
+      .map(remote => remote.name.toLocaleLowerCase('en-US'))
+      .filter(Boolean);
     if (new Set(remoteNameKeys).size !== remoteNameKeys.length) {
       setError('远程 A2A Agent 名称不能重复');
       return;
