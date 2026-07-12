@@ -45,6 +45,12 @@ npm run dev
 - `AGENTMA_SANDBOX_NETWORK_MANAGED_ONLY`：默认关闭；设为 `1` 后只允许 managed domains 网络策略，需先验证 WebFetch/远程 MCP/npx。
 - `AGENTMA_RUN_ENV_ALLOWLIST`：逗号分隔追加传入 agent run 的环境变量名。默认仅传 `PATH,LANG,LC_ALL,LC_CTYPE,TZ,TERM,TMPDIR,SHELL`，再注入本次 provider 的 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`。
 
+## A2A 出站 URL 安全
+
+远程 Agent Card 和 RPC 请求必须通过独立的出站 URL 防护客户端。生产请求仅允许 HTTPS，并会校验全部 A/AAAA 解析结果、固定已校验的连接地址、保留原始 TLS SNI/Host、逐跳重新验证重定向，同时限制重定向次数、响应大小和连接、响应、总时长。
+
+仅本地开发可由调用方显式传入 `allowLoopbackHttp: true` 允许 loopback HTTP。系统不会根据 `NODE_ENV` 或入站请求自动放宽限制；私有地址、链路本地、CGNAT、组播、文档/测试网段和云元数据地址均会被阻止。
+
 ## A2A 远程凭据主密钥
 
 A2A 远程 Agent 的 Bearer 凭据使用 AES-256-GCM 加密后写入 SQLite。主密钥按以下顺序加载：
