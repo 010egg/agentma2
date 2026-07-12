@@ -4623,6 +4623,31 @@ select {
   color: var(--orange);
 }
 
+.sidebar-link-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 14px;
+  padding: 0 4px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  opacity: 0.66;
+  pointer-events: none;
+}
+
+.sidebar-link.active .sidebar-link-meta {
+  color: var(--bg);
+  opacity: 0.78;
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -4722,6 +4747,7 @@ select {
 
 .sidebar.collapsed .sidebar-logo-lockup,
 .sidebar.collapsed .sidebar-section-title,
+.sidebar.collapsed .sidebar-link-meta,
 .sidebar.collapsed .sidebar-link-label,
 .sidebar.collapsed .sidebar-user-meta {
   display: none;

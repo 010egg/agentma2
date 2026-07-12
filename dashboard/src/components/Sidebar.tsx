@@ -14,7 +14,7 @@ const SECTIONS = [
       { path: '/skills', label: '技能', icon: 'spark' },
       { path: '/tools', label: '工具', icon: 'tools' },
       { path: '/memories', label: '记忆', icon: 'pin' },
-      { path: '/visuals', label: '可视化', icon: 'chart' },
+      { path: '/visuals', label: '可视化', icon: 'chart', meta: 'META' },
       { path: '/', label: '总览', icon: 'overview' },
     ],
   },
@@ -33,7 +33,7 @@ const SECTIONS = [
       { path: '/crawler', label: '操作后台', icon: 'tools' },
     ],
   },
-] satisfies Array<{ title: string; adminOnly?: boolean; items: Array<{ path: string; label: string; icon: LineIconName; reviewerVisible?: boolean }> }>;
+] satisfies Array<{ title: string; adminOnly?: boolean; items: Array<{ path: string; label: string; icon: LineIconName; reviewerVisible?: boolean; meta?: string }> }>;
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -86,6 +86,9 @@ export default function Sidebar({ collapsed = false, onNavigate, onToggleCollaps
                   <LineIcon name={item.icon} />
                 </span>
                 <span className="sidebar-link-label">{item.label}</span>
+                {'meta' in item && item.meta && (
+                  <span className="sidebar-link-meta" aria-hidden="true">{item.meta}</span>
+                )}
               </NavLink>
             ))}
           </div>
