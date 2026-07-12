@@ -529,6 +529,9 @@ export class A2AExecutionManager {
           : undefined,
         skills: stringArray(template.skills),
         mcpServers: stringArray(template.mcpServers),
+        platformMcpTools: Array.isArray(template.platformMcpTools)
+          ? stringArray(template.platformMcpTools)
+          : undefined,
         a2aRemoteAgents: Array.isArray(template.a2aRemoteAgents)
           ? template.a2aRemoteAgents as RunAgentOptions['a2aRemoteAgents']
           : undefined,
@@ -537,6 +540,7 @@ export class A2AExecutionManager {
           : undefined,
         enableFileCheckpointing: template.enableFileCheckpointing === true || undefined,
         useKnowledge: template.useKnowledge === true || stringArray(template.knowledgeSourceIds).length > 0,
+        useMemory: template.useMemory !== false,
         knowledgeSourceIds: stringArray(template.knowledgeSourceIds),
         datasourceIds: stringArray(template.datasourceIds),
         maxTurns: Number(template.maxTurns) || 20,

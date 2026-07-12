@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import type { BuiltInTool, RegisteredTool, ToolEndpoint } from '../simulator/types';
 import { BUILT_IN_TOOLS, initCustomTools, saveCustomTools } from '../simulator/mock-data';
 import JsonViewer from '../components/common/JsonViewer';
@@ -8,7 +9,18 @@ import { useAuth } from '../contexts/AuthContext';
 import { fetchProviderModels, listProviderModels } from '../utils/providers';
 import { initToolCategories, saveToolCategories } from '../utils/tool-categories';
 import LineIcon from '../components/LineIcon';
+import McpConnections from './McpConnections';
 import './Tools.css';
+
+type PlatformCatalogTool = RegisteredTool & {
+  source: 'platform';
+  sdkToolName: string;
+  scope: 'global' | 'template';
+  displayName: string;
+  templateId?: string;
+  templateName?: string;
+  remoteId?: string;
+};
 
 const BUILTIN_TAG_META: Record<string, string> = {
   file: '文件操作', execution: '命令执行', task: '任务管理',
@@ -62,12 +74,14 @@ const EMPTY_TOOL_FORM = {
   endpointHeaders: '', endpointBody: '',
 };
 
-export default function Tools() {
+function ToolCatalog() {
   const { user } = useAuth();
   const [customTools, setCustomTools] = useState<RegisteredTool[]>(() => initCustomTools());
   const [customCategories, setCustomCategories] = useState<string[]>(() => initToolCategories(customTools));
   const [internalTools, setInternalTools] = useState<RegisteredTool[]>([]);
   const [internalToolsError, setInternalToolsError] = useState('');
+  const [platformTools, setPlatformTools] = useState<PlatformCatalogTool[]>([]);
+  const [platformToolsError, setPlatformToolsError] = useState('');
   const [providerModels, setProviderModels] = useState<string[]>(() => listProviderModels());
   const [internalToolSettings, setInternalToolSettings] = useState<Record<string, InternalToolSetting>>({});
   const [internalToolDraftModels, setInternalToolDraftModels] = useState<Record<string, string>>({});
@@ -125,6 +139,57 @@ export default function Tools() {
         if (!cancelled) {
           setInternalTools([]);
           setInternalToolsError((error as Error).message || '内部工具加载失败');
+        }
+      });
+    return () => { cancelled = true; };
+  }, [user?.tenantId]);
+
+  useEffect(() => {
+    if (!user?.tenantId) return;
+    let cancelled = false;
+    fetch('/api/platform-mcp-tools', { headers: getAuthHeaders() })
+      .then(async (response) => {
+        if (response.ok) return response.json();
+        const data = await response.json().catch(() => null);
+        throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${response.status}`);
+      })
+      .then((items) => {
+        if (cancelled || !Array.isArray(items)) return;
+        setPlatformToolsError('');
+        setPlatformTools(items.flatMap((item) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+          const raw = item as Record<string, unknown>;
+          const id = typeof raw.id === 'string' ? raw.id : '';
+          const serverName = raw.serverName === 'a2a' ? 'a2a' : raw.serverName === 'memory' ? 'memory' : '';
+          const sdkToolName = typeof raw.sdkToolName === 'string' ? raw.sdkToolName : '';
+          const description = typeof raw.description === 'string' ? raw.description : '';
+          const displayName = typeof raw.displayName === 'string' ? raw.displayName : id;
+          if (!id || !serverName || !sdkToolName || !description) return [];
+          return [{
+            name: id,
+            displayName,
+            description,
+            category: typeof raw.category === 'string' ? raw.category : '平台 MCP',
+            inputSchema: raw.inputSchema && typeof raw.inputSchema === 'object' && !Array.isArray(raw.inputSchema)
+              ? raw.inputSchema as Record<string, unknown>
+              : {},
+            annotations: raw.annotations && typeof raw.annotations === 'object' && !Array.isArray(raw.annotations)
+              ? raw.annotations as RegisteredTool['annotations']
+              : undefined,
+            source: 'platform',
+            mcpServer: serverName,
+            sdkToolName,
+            scope: raw.scope === 'template' ? 'template' : 'global',
+            templateId: typeof raw.templateId === 'string' ? raw.templateId : undefined,
+            templateName: typeof raw.templateName === 'string' ? raw.templateName : undefined,
+            remoteId: typeof raw.remoteId === 'string' ? raw.remoteId : undefined,
+          }];
+        }));
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setPlatformTools([]);
+          setPlatformToolsError((error as Error).message || '平台 MCP 工具加载失败');
         }
       });
     return () => { cancelled = true; };
@@ -194,14 +259,15 @@ export default function Tools() {
     };
   }, [categoryMenu]);
 
-  const allTools: (BuiltInTool | RegisteredTool)[] = [...BUILT_IN_TOOLS, ...internalTools, ...customTools];
+  const allTools: (BuiltInTool | RegisteredTool)[] = [...BUILT_IN_TOOLS, ...platformTools, ...internalTools, ...customTools];
   const tags = Array.from(new Set([
     ...BUILT_IN_TOOLS.map(tool => tool.category),
+    ...platformTools.map(tool => tool.category),
     ...internalTools.map(tool => tool.category),
     ...customCategories,
     ...customTools.map(tool => tool.category),
   ]));
-  const protectedTags = new Set([...Object.keys(BUILTIN_TAG_META), ...internalTools.map(tool => tool.category), '未分类']);
+  const protectedTags = new Set([...Object.keys(BUILTIN_TAG_META), ...platformTools.map(tool => tool.category), ...internalTools.map(tool => tool.category), '未分类']);
   const persist = (list: RegisteredTool[]) => { setCustomTools(list); saveCustomTools(list); };
   const persistCategories = (list: string[]) => { setCustomCategories(list); saveToolCategories(list); };
 
@@ -249,6 +315,12 @@ export default function Tools() {
     return tools.filter(tool => filtered.some(match => match.name === tool.name));
   };
 
+  const toolIdentity = (tool: BuiltInTool | RegisteredTool) => (
+    'source' in tool && tool.source === 'platform'
+      ? `${tool.name}:${(tool as PlatformCatalogTool).templateId || 'global'}`
+      : tool.name
+  );
+
   const toggleTag = (tag: string) => {
     setExpandedTags(current => {
       const next = new Set(current);
@@ -278,6 +350,7 @@ export default function Tools() {
 
   const toolSourceLabel = (tool: BuiltInTool | RegisteredTool) => {
     if (!('source' in tool)) return '内置';
+    if (tool.source === 'platform') return '平台 MCP';
     return tool.source === 'internal' ? '内部' : '自定义';
   };
 
@@ -292,7 +365,7 @@ export default function Tools() {
     if (editingToolName === name) resetToolForm();
   };
   const startEditTool = (tool: RegisteredTool) => {
-    if (tool.source === 'internal') return;
+    if (tool.source === 'internal' || tool.source === 'platform') return;
     setEditingToolName(tool.name);
     setToolFormOpen(true);
     setForm({
@@ -642,9 +715,9 @@ export default function Tools() {
                         <button
                           type="button"
                           role="treeitem"
-                          aria-selected={selectedTool?.name === tool.name}
-                          className={`tool-tree-file ${selectedTool?.name === tool.name ? 'selected' : ''}`}
-                          key={tool.name}
+                          aria-selected={selectedTool ? toolIdentity(selectedTool) === toolIdentity(tool) : false}
+                          className={`tool-tree-file ${selectedTool && toolIdentity(selectedTool) === toolIdentity(tool) ? 'selected' : ''}`}
+                          key={toolIdentity(tool)}
                           onClick={() => selectTool(tool)}
                         >
                           <span className="tool-file-glyph" aria-hidden="true" />
@@ -702,6 +775,7 @@ export default function Tools() {
           </div>
 
           {internalToolsError && <div className="tool-catalog-inline-error">内部工具加载失败：{internalToolsError}</div>}
+          {platformToolsError && <div className="tool-catalog-inline-error">平台 MCP 动态工具加载失败：{platformToolsError}</div>}
 
           {filtered.length === 0 ? (
             <div className="tool-catalog-empty">
@@ -724,13 +798,13 @@ export default function Tools() {
                 <button
                   type="button"
                   role="listitem"
-                  className={`tool-list-row ${selectedTool?.name === tool.name ? 'selected' : ''}`}
-                  key={tool.name}
+                  className={`tool-list-row ${selectedTool && toolIdentity(selectedTool) === toolIdentity(tool) ? 'selected' : ''}`}
+                  key={toolIdentity(tool)}
                   onClick={() => selectTool(tool)}
                 >
                   <span className="tool-list-name"><span className="tool-file-glyph" aria-hidden="true" /><code>{tool.name}</code></span>
                   <span className="tool-list-description">{tool.description}</span>
-                  <span><em className={`tool-source-pill ${!('source' in tool) ? 'is-builtin' : tool.source === 'internal' ? 'is-internal' : 'is-custom'}`}>{toolSourceLabel(tool)}</em></span>
+                  <span><em className={`tool-source-pill ${!('source' in tool) ? 'is-builtin' : tool.source === 'platform' ? 'is-platform' : tool.source === 'internal' ? 'is-internal' : 'is-custom'}`}>{toolSourceLabel(tool)}</em></span>
                   <span className="tool-list-permission">{tool.annotations?.readOnlyHint ? '只读' : tool.annotations?.destructiveHint ? '需确认' : '标准'}</span>
                 </button>
               ))}
@@ -746,7 +820,7 @@ export default function Tools() {
                   <p>{selectedTool.description}</p>
                 </div>
                 <div className="tool-detail-actions">
-                  {'source' in selectedTool && selectedTool.source !== 'internal' && (
+                  {'source' in selectedTool && selectedTool.source !== 'internal' && selectedTool.source !== 'platform' && (
                     <>
                       <button className="btn btn-sm" onClick={() => startEditTool(selectedTool)}>编辑</button>
                       <button className="btn btn-sm btn-danger" onClick={() => handleDelete(selectedTool.name)}>删除</button>
@@ -835,3 +909,42 @@ export default function Tools() {
   );
 }
 
+type ToolsHubTab = 'catalog' | 'mcp';
+
+export default function Tools() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab: ToolsHubTab = searchParams.get('tab') === 'mcp' ? 'mcp' : 'catalog';
+  const selectTab = (tab: ToolsHubTab) => {
+    setSearchParams(tab === 'mcp' ? { tab: 'mcp' } : {}, { replace: true });
+  };
+
+  return (
+    <div className="tools-hub">
+      <div className="tools-hub-tabs" role="tablist" aria-label="工具管理视图">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'catalog'}
+          className={activeTab === 'catalog' ? 'active' : ''}
+          onClick={() => selectTab('catalog')}
+        >
+          <LineIcon name="tools" />
+          <strong>工具目录</strong>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'mcp'}
+          className={activeTab === 'mcp' ? 'active' : ''}
+          onClick={() => selectTab('mcp')}
+        >
+          <LineIcon name="radio" />
+          <strong>MCP 连接</strong>
+        </button>
+      </div>
+      <div className="tools-hub-panel" role="tabpanel">
+        {activeTab === 'mcp' ? <McpConnections /> : <ToolCatalog />}
+      </div>
+    </div>
+  );
+}

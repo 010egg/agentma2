@@ -3,8 +3,9 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { guardedFetch, OutboundRequestError } from './server-outbound-url.ts';
 import { resolveA2ACredential } from './server-store.ts';
+import { a2aPlatformToolId } from './src/utils/platform-mcp-tools.ts';
 
-export type A2ARemoteConfig = { name: string; agentCardUrl: string; credentialRef?: string };
+export type A2ARemoteConfig = { id?: string; name: string; agentCardUrl: string; credentialRef?: string };
 type QuestionRequester = (request: {
   questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }>;
   toolUseID: string;
@@ -16,6 +17,7 @@ export type A2ARemoteToolDescriptor = {
   config: A2ARemoteConfig;
   toolName: string;
   sdkToolName: string;
+  platformToolId?: string;
 };
 
 const CARD_TTL_MS = 5 * 60 * 1000;
@@ -103,10 +105,14 @@ export function remoteA2AToolName(
   agentCardUrl: string,
   index: number,
   usedNames = new Set<string>(),
+  remoteId = '',
 ) {
   const slug = name.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
   const base = `remote_${slug || 'agent'}`;
-  let candidate = base;
+  const stableSuffix = remoteId
+    ? crypto.createHash('sha256').update(remoteId).digest('hex').slice(0, 8)
+    : '';
+  let candidate = stableSuffix ? `${base.slice(0, 54)}_${stableSuffix}` : base;
   if (!slug || usedNames.has(candidate)) {
     const hash = crypto.createHash('sha256').update(`${name}\0${agentCardUrl}\0${index}`).digest('hex').slice(0, 8);
     candidate = `${base.slice(0, 54)}_${hash}`;
@@ -118,8 +124,13 @@ export function remoteA2AToolName(
 export function describeA2ARemoteTools(remotes: A2ARemoteConfig[]): A2ARemoteToolDescriptor[] {
   const usedToolNames = new Set<string>();
   return remotes.slice(0, 16).map((config, index) => {
-    const toolName = remoteA2AToolName(config.name, config.agentCardUrl, index, usedToolNames);
-    return { config, toolName, sdkToolName: `mcp__a2a__${toolName}` };
+    const toolName = remoteA2AToolName(config.name, config.agentCardUrl, index, usedToolNames, config.id);
+    return {
+      config,
+      toolName,
+      sdkToolName: `mcp__a2a__${toolName}`,
+      ...(config.id ? { platformToolId: a2aPlatformToolId(config.id) } : {}),
+    };
   });
 }
 

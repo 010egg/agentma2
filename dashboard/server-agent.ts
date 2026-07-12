@@ -21,6 +21,11 @@ import { DATASOURCE_QUERY_MAX_ROWS } from './server-datasource.ts';
 import { buildMemoryMcp, buildMemorySystemPrompt, readMemoryIndex } from './server-memory.ts';
 import { buildDatasourceMcp, buildImageMcp, buildMediaMcp, buildModelRequestMcp, listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, type RunOutcome } from './src/simulator/run-state.ts';
+import {
+  MEMORY_RECALL_TOOL_ID,
+  MEMORY_REMEMBER_TOOL_ID,
+  a2aPlatformToolId,
+} from './src/utils/platform-mcp-tools.ts';
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
 // Edit to match your provider's actual rates. The SDK's own total_cost_usd
@@ -473,15 +478,24 @@ export interface RunAgentOptions {
   skills?: string[];
   /** MCP server names expected to be loaded natively from project .mcp.json. */
   mcpServers?: string[];
+  /** Platform-managed remote MCP connections. Credentials remain in server memory. */
+  mcpConnections?: Array<{
+    name: string;
+    type: 'http' | 'sse';
+    url: string;
+    headers?: Record<string, string>;
+  }>;
   /** Allow the agent to read tenant-configured knowledge source directories. */
   useKnowledge?: boolean;
   knowledgeSourceIds?: string[];
   /** Inject the per-user memory index and expose recall/remember tools. Defaults to enabled. */
   useMemory?: boolean;
+  /** Exact logical IDs for built-in platform MCP tools. Missing preserves legacy defaults. */
+  platformMcpTools?: string[];
   /** Tenant datasource ids exposed via the read-only datasource MCP tools. */
   datasourceIds?: string[];
   /** Remote A2A Agents exposed as guarded internal MCP tools. */
-  a2aRemoteAgents?: Array<{ name: string; agentCardUrl: string; credentialRef?: string }>;
+  a2aRemoteAgents?: Array<{ id?: string; name: string; agentCardUrl: string; credentialRef?: string }>;
   maxTurns?: number;
   /** Reasoning effort for the MAIN session. Subagent effort is carried separately via AgentDefinition. */
   effort?: EffortLevel;
@@ -516,6 +530,31 @@ export type AgentRunResult = {
 
 export function shouldEnableMemoryForRun(opts: Pick<RunAgentOptions, 'tenantId' | 'sub' | 'useMemory'>) {
   return Boolean(opts.tenantId && opts.sub) && opts.useMemory !== false;
+}
+
+export function memoryCapabilitiesForRun(
+  opts: Pick<RunAgentOptions, 'tenantId' | 'sub' | 'useMemory' | 'platformMcpTools'>,
+) {
+  if (!opts.tenantId || !opts.sub) return { recall: false, remember: false };
+  if (opts.platformMcpTools === undefined) {
+    const enabled = opts.useMemory !== false;
+    return { recall: enabled, remember: enabled };
+  }
+  const selected = new Set(opts.platformMcpTools);
+  return {
+    recall: selected.has(MEMORY_RECALL_TOOL_ID),
+    remember: selected.has(MEMORY_REMEMBER_TOOL_ID),
+  };
+}
+
+export function a2aRemotesForRun(
+  opts: Pick<RunAgentOptions, 'a2aRemoteAgents' | 'platformMcpTools'>,
+) {
+  if (opts.platformMcpTools === undefined) return opts.a2aRemoteAgents || [];
+  const selected = new Set(opts.platformMcpTools);
+  return (opts.a2aRemoteAgents || []).filter(remote => (
+    !remote.id || selected.has(a2aPlatformToolId(remote.id))
+  ));
 }
 
 const RUN_CWD_PREFIX = 'agentma-run-';
@@ -1166,6 +1205,17 @@ function appendUploadedImagePaths(prompt: string, files: MaterializedPromptImage
   ].join('\n');
 }
 
+function seedMcpServerNames(cwd: string) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(cwd, '.mcp.json'), 'utf8')) as Record<string, unknown>;
+    const servers = parsed?.mcpServers;
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return new Set<string>();
+    return new Set(Object.keys(servers as Record<string, unknown>));
+  } catch {
+    return new Set<string>();
+  }
+}
+
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const cwd = opts.cwd || path.join('/tmp', `agentma-run-${opts.tenantId}-${Date.now()}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -1176,6 +1226,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   if (opts.seedDir && isFreshCwd && fs.existsSync(opts.seedDir)) {
     copyAgentSeedSafe(opts.seedDir, cwd);
     fs.writeFileSync(seedMarkerPath, String(Date.now()));
+  }
+  const seedMcpNames = seedMcpServerNames(cwd);
+  for (const connection of opts.mcpConnections || []) {
+    if (!seedMcpNames.has(connection.name)) continue;
+    opts.emit({
+      type: 'run_log',
+      level: 'warn',
+      scope: 'mcp',
+      message: `平台 MCP 连接 "${connection.name}" 覆盖了 Agent seed 中的同名 .mcp.json 配置`,
+    });
   }
 
   // Per-call env: 仅白名单，绝不把宿主全部 process.env 灌进租户 run。
@@ -1219,11 +1279,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const customMcp = buildCustomToolsMcp(opts.requestTools || []);
   const a2aRuntimeToolNames = new Set<string>();
   let a2aRemoteMcp = null;
-  if (opts.a2aRemoteAgents?.length) {
+  const selectedA2ARemotes = a2aRemotesForRun(opts);
+  if (selectedA2ARemotes.length) {
     const a2aClient = await import('./server-a2a-client.ts');
-    const descriptors = a2aClient.describeA2ARemoteTools(opts.a2aRemoteAgents);
+    const descriptors = a2aClient.describeA2ARemoteTools(selectedA2ARemotes);
     for (const descriptor of descriptors) a2aRuntimeToolNames.add(descriptor.sdkToolName);
-    a2aRemoteMcp = a2aClient.buildA2ARemoteMcp(opts.tenantId, opts.a2aRemoteAgents, {
+    a2aRemoteMcp = a2aClient.buildA2ARemoteMcp(opts.tenantId, selectedA2ARemotes, {
       requestUserQuestion: opts.requestUserQuestion,
       signal: opts.abortController?.signal,
       onLog: event => opts.emit({ type: 'run_log', scope: 'a2a', ...event }),
@@ -1301,10 +1362,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   });
   const uploadedImageGuardEnabled = hasPromptImages || hasAttachmentImages || imageInspectAvailable;
   // 跨会话记忆(按 tenant/sub 隔离):普通运行默认开启,调用方可显式关闭。
-  const memoryEnabled = shouldEnableMemoryForRun(opts);
+  const memoryCapabilities = memoryCapabilitiesForRun(opts);
+  const memoryEnabled = memoryCapabilities.recall || memoryCapabilities.remember;
   const memoryAuth = { tenantId: opts.tenantId, sub: opts.sub };
-  const memoryMcp = memoryEnabled ? buildMemoryMcp(memoryAuth) : null;
-  const memorySystemPrompt = memoryEnabled ? buildMemorySystemPrompt(readMemoryIndex(memoryAuth)) : '';
+  const memoryMcp = memoryEnabled ? buildMemoryMcp(memoryAuth, memoryCapabilities) : null;
+  const memorySystemPrompt = memoryEnabled
+    ? buildMemorySystemPrompt(memoryCapabilities.recall ? readMemoryIndex(memoryAuth) : '', memoryCapabilities)
+    : '';
+  const memoryRuntimeToolNames = new Set([
+    ...(memoryCapabilities.recall ? ['mcp__memory__recall'] : []),
+    ...(memoryCapabilities.remember ? ['mcp__memory__remember'] : []),
+  ]);
   const datasourceSystemPrompt = datasources.length ? buildDatasourceSystemPrompt(datasources) : '';
   const skillsSystemPrompt = runSkills.length ? buildSkillsSystemPrompt(runSkills) : '';
   const askUserQuestionSystemPrompt = opts.tools?.includes('AskUserQuestion') ? buildAskUserQuestionSystemPrompt() : '';
@@ -1408,7 +1476,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     const allowedByNativeMcpServer = toolName.startsWith('mcp__') && Array.from(nativeMcpServerNames).some((serverName) => (
       toolName.startsWith(`mcp__${serverName}__`)
     ));
-    const allowedByBuiltinMemory = toolName.startsWith('mcp__memory__');
+    const allowedByBuiltinMemory = memoryRuntimeToolNames.has(toolName);
     const allowedByA2ARemote = a2aRuntimeToolNames.has(toolName);
     if (templateToolNames.size > 0 && !templateToolNames.has(toolName) && !allowedBySubagentDefinition && !allowedByNativeMcpServer && !allowedByBuiltinMemory && !allowedByA2ARemote) {
       return { behavior: 'deny', message: `Tool '${toolName}' is not enabled by the agent template.` } as PermissionResult;
@@ -1614,7 +1682,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         env,
         settings: { showThinkingSummaries: true },
         ...(hooks ? { hooks, includeHookEvents: true } : {}),
-        ...(customMcp || datasourceMcp || modelRequestMcp || imageMcp || mediaMcp || memoryMcp || a2aRemoteMcp ? {
+        ...(customMcp || datasourceMcp || modelRequestMcp || imageMcp || mediaMcp || memoryMcp || a2aRemoteMcp || opts.mcpConnections?.length ? {
           mcpServers: {
             ...(customMcp ? { custom: customMcp } : {}),
             ...(datasourceMcp ? { datasource: datasourceMcp } : {}),
@@ -1623,6 +1691,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
             ...(mediaMcp ? { media: mediaMcp } : {}),
             ...(memoryMcp ? { memory: memoryMcp } : {}),
             ...(a2aRemoteMcp ? { a2a: a2aRemoteMcp } : {}),
+            ...(opts.mcpConnections?.length ? Object.fromEntries(opts.mcpConnections.map((connection) => [
+              connection.name,
+              {
+                type: connection.type,
+                url: connection.url,
+                ...(connection.headers ? { headers: connection.headers } : {}),
+              },
+            ])) : {}),
           },
         } : {}),
         ...(effectiveSystemPrompt ? { systemPrompt: effectiveSystemPrompt } : {}),

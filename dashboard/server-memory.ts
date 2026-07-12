@@ -320,11 +320,11 @@ export function consolidateMemories(auth: MemoryAuth): { kept: number; removed: 
 const RECALL_DESC = '按名称读取当前用户的长期记忆正文。先根据 system prompt 中的 <memory_index> 判断相关性，只召回当前请求需要的忆块；索引摘要只是路由信息，不能替代正文。';
 const REMEMBER_DESC = '把非显而易见、以后跨会话能复用的事实存入长期记忆(仅本用户可见)。适合:用户身份/偏好、你被纠正过的做法(含原因)、项目约束或目标、外部资源指针。不要存能从代码/历史直接得到的、或只对当前对话有用的内容。保存前先看 <memory_index>，必要时调用 recall 确认正文，避免重复。';
 
-export function buildMemoryMcp(auth: MemoryAuth) {
-  return createSdkMcpServer({
-    name: 'memory',
-    version: '2.0.0',
-    tools: [
+export type MemoryCapabilities = { recall: boolean; remember: boolean };
+
+export function buildMemoryMcp(auth: MemoryAuth, capabilities: MemoryCapabilities = { recall: true, remember: true }) {
+  const tools = [
+    ...(capabilities.recall ? [
       tool('recall', RECALL_DESC, {
         names: z.array(z.string().min(1)).min(1).max(8).describe('要读取的记忆 slug；每次最多 8 个'),
       }, async (args: any) => {
@@ -335,6 +335,8 @@ export function buildMemoryMcp(auth: MemoryAuth) {
           return { content: [{ type: 'text', text: `召回失败: ${(e as Error).message}` }], isError: true };
         }
       }),
+    ] : []),
+    ...(capabilities.remember ? [
       tool('remember', REMEMBER_DESC, {
         name: z.string().describe('短横线小写 slug,如 user-prefers-ts'),
         description: z.string().describe('一句话摘要,召回时用于判断相关性'),
@@ -348,15 +350,25 @@ export function buildMemoryMcp(auth: MemoryAuth) {
           return { content: [{ type: 'text', text: `记忆失败: ${(e as Error).message}` }], isError: true };
         }
       }),
-    ],
+    ] : []),
+  ];
+  return createSdkMcpServer({
+    name: 'memory',
+    version: '2.0.0',
+    tools,
   });
 }
 
-export function buildMemorySystemPrompt(index: string) {
-  const instruction = [
-    '# Memory',
-    '你有按用户隔离的跨会话长期记忆。下方 <memory_index> 只有名称和摘要，是用于判断相关性的路由索引，不是完整事实。当前请求与某条索引相关时，先调用 mcp__memory__recall 读取正文，再据此回答；只召回当前请求需要的忆块。出现值得长期复用的新事实时，调用 mcp__memory__remember 保存。不要保存能从代码或当前对话直接得到、或只对当前对话有用的内容。',
-  ].join('\n');
+export function buildMemorySystemPrompt(index: string, capabilities: MemoryCapabilities = { recall: true, remember: true }) {
+  const instructions = ['# Memory', '你有按用户隔离的跨会话长期记忆。'];
+  if (capabilities.recall) {
+    instructions.push('下方 <memory_index> 只有名称和摘要，是用于判断相关性的路由索引，不是完整事实。当前请求与某条索引相关时，先调用 mcp__memory__recall 读取正文，再据此回答；只召回当前请求需要的忆块。');
+  }
+  if (capabilities.remember) {
+    instructions.push('出现值得长期复用的新事实时，调用 mcp__memory__remember 保存。不要保存能从代码或当前对话直接得到、或只对当前对话有用的内容。');
+  }
+  const instruction = instructions.join('\n');
+  if (!capabilities.recall) return instruction;
   if (!index) return `${instruction}\n\n(当前无已存记忆。)`;
   return `${instruction}\n\n<memory_index>\n${index}\n</memory_index>`;
 }

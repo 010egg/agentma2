@@ -12,7 +12,7 @@ const PAGE_META = [
   { match: (path: string) => path === '/playground', title: 'Playground', eyebrow: 'sdk query', lede: '调试 query 请求、工具、权限和模型参数。' },
   { match: (path: string) => path === '/account', title: '账户管理', eyebrow: 'tenant', lede: '租户、供应商、用户、团队、API key、配额和审计。' },
   { match: (path: string) => path === '/settings', title: '全局设置', eyebrow: 'settings', lede: '会话、限制和工具默认配置。' },
-  { match: (path: string) => path === '/tools', title: '工具背包', eyebrow: 'tools', lede: '维护本地工具、远程端点和标签。' },
+  { match: (path: string) => path === '/tools', title: '工具', eyebrow: 'tools & mcp', lede: '统一管理工具定义与租户远程 MCP 连接。' },
   { match: (path: string) => path === '/knowledge', title: '知识库', eyebrow: 'knowledge', lede: '上传、管理、测试和绑定知识源。' },
   { match: (path: string) => path === '/skills', title: '技能背包', eyebrow: 'skills', lede: '从 GitHub 导入，或从 workspace 抽取到用户背包。' },
   { match: (path: string) => path === '/hooks', title: 'Hook 系统', eyebrow: 'hooks', lede: '管理真实 Hook 规则和运行时决策日志。' },
@@ -49,7 +49,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       const next = !prev;
       try {
         localStorage.setItem('agentma_sidebar_collapsed', String(next));
-      } catch {}
+      } catch { /* localStorage may be unavailable in restricted browsers */ }
       return next;
     });
   };

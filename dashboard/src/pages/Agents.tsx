@@ -9,6 +9,15 @@ import { listProviderModels, resolveProviderForModel } from '../utils/providers'
 import ModelPicker from '../components/common/ModelPicker';
 import LineIcon from '../components/LineIcon';
 import A2AConfigEditor from '../components/A2AConfigEditor';
+import {
+  MEMORY_PLATFORM_TOOL_IDS,
+  STATIC_PLATFORM_MCP_TOOLS,
+  a2aPlatformToolId,
+  buildA2APlatformToolDescriptor,
+  isA2APlatformToolId,
+  mintA2ARemoteId,
+  selectedPlatformToolIds,
+} from '../utils/platform-mcp-tools';
 
 type KnowledgeSource = {
   id: string;
@@ -16,6 +25,17 @@ type KnowledgeSource = {
   path: string;
   enabled: boolean;
 };
+
+type ManagedMcpConnection = {
+  id: string;
+  name: string;
+  url: string;
+  type: 'http' | 'sse';
+  enabled: boolean;
+  publishedAt: number | null;
+};
+
+const MAX_TEMPLATE_MCP_SERVERS = 8;
 
 function normalizeInternalTools(items: unknown): RegisteredTool[] {
   if (!Array.isArray(items)) return [];
@@ -114,6 +134,26 @@ function normalizeKnowledgeSources(value: unknown): KnowledgeSource[] {
   });
 }
 
+function normalizeManagedMcpConnections(value: unknown): ManagedMcpConnection[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const raw = item as Record<string, unknown>;
+    const id = typeof raw.id === 'string' ? raw.id : '';
+    const name = typeof raw.name === 'string' ? raw.name : '';
+    const url = typeof raw.url === 'string' ? raw.url : '';
+    if (!id || !name || !url) return [];
+    return [{
+      id,
+      name,
+      url,
+      type: raw.type === 'sse' ? 'sse' : 'http',
+      enabled: raw.enabled !== false,
+      publishedAt: Number(raw.publishedAt) || null,
+    }];
+  });
+}
+
 function getDirectoryRelativePath(file: File) {
   return ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name).replace(/\\/g, '/');
 }
@@ -125,6 +165,8 @@ function newTemplate(): AgentTemplate {
     mcpServers: [], eventSources: [], skills: [], knowledgeSourceIds: [],
     effort: 'high', maxTurns: 50, permissionMode: 'default',
     useMemory: true,
+    platformMcpTools: [...MEMORY_PLATFORM_TOOL_IDS],
+    disabledPlatformMcpTools: [],
     a2aPublished: false, a2aRemoteAgents: [],
     createdAt: Date.now(), updatedAt: Date.now(),
   };
@@ -166,10 +208,25 @@ function getCloneTemplateId(templates: AgentTemplate[], now: number) {
 function cloneTemplate(source: AgentTemplate, templates: AgentTemplate[]): AgentTemplate {
   const now = Date.now();
   const cloned = JSON.parse(JSON.stringify(source)) as AgentTemplate;
+  const idMap = new Map<string, string>();
+  const a2aRemoteAgents = cloned.a2aRemoteAgents.map(remote => {
+    const id = mintA2ARemoteId();
+    idMap.set(remote.id, id);
+    return { ...remote, id };
+  });
+  const remapPlatformToolId = (toolId: string) => {
+    if (!isA2APlatformToolId(toolId)) return toolId;
+    const oldRemoteId = toolId.slice('a2a.remote.'.length);
+    const nextRemoteId = idMap.get(oldRemoteId);
+    return nextRemoteId ? a2aPlatformToolId(nextRemoteId) : '';
+  };
   return {
     ...cloned,
     id: getCloneTemplateId(templates, now),
     name: getCloneTemplateName(source.name, templates),
+    a2aRemoteAgents,
+    platformMcpTools: (cloned.platformMcpTools || []).map(remapPlatformToolId).filter(Boolean),
+    disabledPlatformMcpTools: (cloned.disabledPlatformMcpTools || []).map(remapPlatformToolId).filter(Boolean),
     createdBy: undefined,
     publishedAt: null,
     archivedAt: null,
@@ -225,7 +282,9 @@ export default function Agents() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   // 动态加载技能和 MCP 服务器（非写死）
   const [liveSkills] = useState<SkillInfo[]>(loadSkills);
-  const [liveMcp] = useState<{ name: string }[]>(loadMcpServers);
+  const [legacyMcp] = useState<{ name: string }[]>(loadMcpServers);
+  const [managedMcp, setManagedMcp] = useState<ManagedMcpConnection[]>([]);
+  const [mcpNameDraft, setMcpNameDraft] = useState('');
   const [liveKnowledgeSources, setLiveKnowledgeSources] = useState<KnowledgeSource[]>([]);
   const [liveEventSources, setLiveEventSources] = useState<Array<{ name: string; type: string; url: string; enabled: boolean }>>([]);
   const modelSuggestions = listProviderModels();
@@ -251,14 +310,38 @@ export default function Agents() {
 
   useEffect(() => {
     if (!user?.tenantId) return;
-    fetch('/api/knowledge/sources', { headers: getAuthHeaders() })
-      .then(r => r.ok ? r.json() : [])
-      .then(data => setLiveKnowledgeSources(normalizeKnowledgeSources(data)))
-      .catch(() => setLiveKnowledgeSources([]));
+    void Promise.all([
+      fetch('/api/knowledge/sources', { headers: getAuthHeaders() })
+        .then(r => r.ok ? r.json() : [])
+        .then(data => setLiveKnowledgeSources(normalizeKnowledgeSources(data)))
+        .catch(() => setLiveKnowledgeSources([])),
+      fetch('/api/mcp-connections', { headers: getAuthHeaders() })
+        .then(r => r.ok ? r.json() : [])
+        .then(data => setManagedMcp(normalizeManagedMcpConnections(data)))
+        .catch(() => setManagedMcp([])),
+    ]);
   }, [user?.tenantId]);
   const [liveCustomTools, setLiveCustomTools] = useState<RegisteredTool[]>(() => initCustomTools());
   const [liveInternalTools, setLiveInternalTools] = useState<RegisteredTool[]>([]);
   const subagentEntries = Object.entries(form.subagents || {});
+  const selectedPlatformTools = new Set(selectedPlatformToolIds(
+    form.a2aRemoteAgents || [],
+    form.platformMcpTools,
+    form.disabledPlatformMcpTools,
+    form.useMemory !== false,
+  ));
+  const platformTools = [
+    ...STATIC_PLATFORM_MCP_TOOLS,
+    ...(form.a2aRemoteAgents || []).map(remote => buildA2APlatformToolDescriptor(
+      { id: form.id || 'new-agent', name: form.name || '新 Agent' },
+      remote,
+    )),
+  ];
+  const managedMcpNames = new Set(managedMcp.map(connection => connection.name));
+  const compatibleMcpNames = Array.from(new Set([
+    ...legacyMcp.map(server => server.name),
+    ...form.mcpServers,
+  ])).filter(name => !managedMcpNames.has(name));
 
   useEffect(() => {
     if (!isEditorOpen) return;
@@ -467,6 +550,7 @@ export default function Agents() {
       return;
     }
     const normalizedA2ARemotes = (form.a2aRemoteAgents || []).map((remote) => ({
+      id: remote.id || mintA2ARemoteId(),
       name: remote.name.trim(),
       agentCardUrl: remote.agentCardUrl.trim(),
       credentialRef: remote.credentialRef?.trim() || undefined,
@@ -501,6 +585,19 @@ export default function Agents() {
     const effectiveTools = selectedSkills.length > 0
       ? Array.from(new Set([...form.tools, 'Skill']))
       : form.tools;
+    const disabledPlatformMcpTools = (form.disabledPlatformMcpTools || []).filter(toolId => (
+      normalizedA2ARemotes.some(remote => a2aPlatformToolId(remote.id) === toolId)
+    ));
+    const knownPlatformToolIds = new Set([
+      ...MEMORY_PLATFORM_TOOL_IDS,
+      ...normalizedA2ARemotes.map(remote => a2aPlatformToolId(remote.id)),
+    ]);
+    const platformMcpTools = selectedPlatformToolIds(
+      normalizedA2ARemotes,
+      form.platformMcpTools,
+      disabledPlatformMcpTools,
+      form.useMemory !== false,
+    ).filter(toolId => knownPlatformToolIds.has(toolId));
     const saved: AgentTemplate = {
       ...form,
       id: form.id || `agent-${now}`,
@@ -512,7 +609,9 @@ export default function Agents() {
       deletedAt: form.deletedAt || null,
       knowledgeSourceIds: selectedKnowledgeIds,
       useKnowledge: selectedKnowledgeIds.length > 0 || hasLegacyAllKnowledge || undefined,
-      useMemory: form.useMemory !== false,
+      useMemory: MEMORY_PLATFORM_TOOL_IDS.some(toolId => platformMcpTools.includes(toolId)),
+      platformMcpTools,
+      disabledPlatformMcpTools,
       visualPreprocessDefault: form.visualPreprocessDefault === true ? true : undefined,
       visualPreprocessModel: visualModel || undefined,
       a2aPublished: form.a2aPublished === true,
@@ -723,6 +822,64 @@ export default function Agents() {
     }));
   };
 
+  const togglePlatformTool = (toolId: string) => {
+    setForm(prev => {
+      const selected = new Set(selectedPlatformToolIds(
+        prev.a2aRemoteAgents || [],
+        prev.platformMcpTools,
+        prev.disabledPlatformMcpTools,
+        prev.useMemory !== false,
+      ));
+      const disabled = new Set(prev.disabledPlatformMcpTools || []);
+      if (selected.has(toolId)) {
+        selected.delete(toolId);
+        if (isA2APlatformToolId(toolId)) disabled.add(toolId);
+      } else {
+        selected.add(toolId);
+        disabled.delete(toolId);
+      }
+      return {
+        ...prev,
+        platformMcpTools: Array.from(selected),
+        disabledPlatformMcpTools: Array.from(disabled),
+        useMemory: MEMORY_PLATFORM_TOOL_IDS.some(memoryToolId => selected.has(memoryToolId)),
+      };
+    });
+  };
+
+  const updateA2ARemoteAgents = (a2aRemoteAgents: AgentTemplate['a2aRemoteAgents']) => {
+    setForm(current => {
+      const previousIds = new Set((current.a2aRemoteAgents || []).map(remote => remote.id));
+      const nextToolIds = new Set(a2aRemoteAgents.map(remote => a2aPlatformToolId(remote.id)));
+      const selected = new Set(selectedPlatformToolIds(
+        current.a2aRemoteAgents || [],
+        current.platformMcpTools,
+        current.disabledPlatformMcpTools,
+        current.useMemory !== false,
+      ));
+      const disabled = new Set(current.disabledPlatformMcpTools || []);
+      for (const remote of a2aRemoteAgents) {
+        const toolId = a2aPlatformToolId(remote.id);
+        if (!previousIds.has(remote.id)) {
+          selected.add(toolId);
+          disabled.delete(toolId);
+        }
+      }
+      for (const toolId of Array.from(selected)) {
+        if (isA2APlatformToolId(toolId) && !nextToolIds.has(toolId)) selected.delete(toolId);
+      }
+      for (const toolId of Array.from(disabled)) {
+        if (!nextToolIds.has(toolId)) disabled.delete(toolId);
+      }
+      return {
+        ...current,
+        a2aRemoteAgents,
+        platformMcpTools: Array.from(selected),
+        disabledPlatformMcpTools: Array.from(disabled),
+      };
+    });
+  };
+
   const toggleKnowledgeSource = (sourceId: string) => {
     setForm(prev => ({
       ...prev,
@@ -777,12 +934,34 @@ export default function Agents() {
   };
 
   const toggleMcp = (srv: string) => {
+    if (!form.mcpServers.includes(srv) && form.mcpServers.length >= MAX_TEMPLATE_MCP_SERVERS) {
+      setError(`每个 Agent 模板最多选择 ${MAX_TEMPLATE_MCP_SERVERS} 个 MCP 服务器`);
+      return;
+    }
     setForm(prev => ({
       ...prev,
       mcpServers: prev.mcpServers.includes(srv)
         ? prev.mcpServers.filter(s => s !== srv)
         : [...prev.mcpServers, srv],
     }));
+  };
+
+  const addManualMcp = () => {
+    const name = mcpNameDraft.trim();
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(name)) {
+      setError('MCP 名称只能包含字母、数字、点、下划线和连字符');
+      return;
+    }
+    if (form.mcpServers.includes(name)) {
+      setMcpNameDraft('');
+      return;
+    }
+    if (form.mcpServers.length >= MAX_TEMPLATE_MCP_SERVERS) {
+      setError(`每个 Agent 模板最多选择 ${MAX_TEMPLATE_MCP_SERVERS} 个 MCP 服务器`);
+      return;
+    }
+    setForm(prev => ({ ...prev, mcpServers: [...prev.mcpServers, name] }));
+    setMcpNameDraft('');
   };
 
   const toggleEventSource = (name: string) => {
@@ -1553,28 +1732,19 @@ export default function Agents() {
             </details>
 
             {/* 文件检查点 */}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-              <input
-                type="checkbox"
-                checked={Boolean(form.enableFileCheckpointing)}
-                onChange={e => setForm({ ...form, enableFileCheckpointing: e.target.checked || undefined })}
-                style={{ width: 'auto' }}
-              />
-              <span style={{ fontSize: '.85em' }}>
-                enableFileCheckpointing — 编辑前快照文件，支持 /rewind 回滚
-              </span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }} title="开启后注入当前用户的记忆索引，Agent 可按需召回正文并写入新记忆。">
-              <input
-                type="checkbox"
-                checked={form.useMemory !== false}
-                onChange={e => setForm({ ...form, useMemory: e.target.checked })}
-                style={{ width: 'auto' }}
-              />
-              <span style={{ fontSize: '.85em' }}>
-                长期记忆 — 注入索引并允许按需召回
-              </span>
-            </label>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.enableFileCheckpointing)}
+                  onChange={e => setForm({ ...form, enableFileCheckpointing: e.target.checked || undefined })}
+                  style={{ width: 'auto' }}
+                />
+                <span style={{ fontSize: '.85em' }}>
+                  文件检查点 — 编辑前快照文件，支持 /rewind 回滚
+                </span>
+              </label>
+            </div>
 
             <A2AConfigEditor
               key={user?.tenantId || 'signed-out'}
@@ -1583,7 +1753,7 @@ export default function Agents() {
               remoteAgents={form.a2aRemoteAgents || []}
               canManageCredentials={user?.role === 'tenant_admin'}
               onPublishedChange={a2aPublished => setForm(current => ({ ...current, a2aPublished }))}
-              onRemoteAgentsChange={a2aRemoteAgents => setForm(current => ({ ...current, a2aRemoteAgents }))}
+              onRemoteAgentsChange={updateA2ARemoteAgents}
             />
 
             {/* 知识库选择 */}
@@ -1678,6 +1848,35 @@ export default function Agents() {
                     </div>
                   </div>
                 ))}
+                <div>
+                  <div className="agent-platform-tools-head">
+                    <span>平台 MCP</span>
+                    <a href="/tools" target="_self">查看目录</a>
+                  </div>
+                  <div className="agent-platform-tools">
+                    {platformTools.map(tool => {
+                      const selected = selectedPlatformTools.has(tool.id);
+                      return (
+                        <label
+                          key={tool.id}
+                          className={`agent-platform-tool${selected ? ' selected' : ''}`}
+                          title={tool.description}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => togglePlatformTool(tool.id)}
+                          />
+                          <span>
+                            <strong>{tool.displayName}</strong>
+                            <code>{tool.id}</code>
+                          </span>
+                          <small>{tool.serverName} MCP</small>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
                 {/* 自定义工具（动态加载，和内置工具混在一起） */}
                 {liveCustomTools.length > 0 && (
                   <div>
@@ -1882,32 +2081,61 @@ export default function Agents() {
             )}
 
             {/* MCP 服务器选择 */}
-            <div className="form-group">
-              <label>MCP 服务器 · <a href="/tools" style={{ color: 'var(--accent)', fontSize: '.85em' }}>管理</a></label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {liveMcp.map(srv => (
-                  <label
-                    key={srv.name}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                      padding: '3px 8px', borderRadius: 4,
-                      fontSize: '.76em', cursor: 'pointer',
-                      background: form.mcpServers.includes(srv.name) ? 'var(--info-bg)' : 'var(--bg-hover)',
-                      color: form.mcpServers.includes(srv.name) ? 'var(--info)' : 'var(--ink-secondary)',
-                      border: `1px solid ${form.mcpServers.includes(srv.name) ? 'var(--info)' : 'transparent'}`,
+            <div className="form-group agent-mcp-picker">
+              <div className="agent-mcp-picker-head">
+                <label>MCP 服务器 · 已选 {form.mcpServers.length}/{MAX_TEMPLATE_MCP_SERVERS}</label>
+                <a href="/tools?tab=mcp">管理连接</a>
+              </div>
+              {managedMcp.length > 0 ? (
+                <div className="agent-mcp-options">
+                  {managedMcp.map(connection => {
+                    const selected = form.mcpServers.includes(connection.name);
+                    const unavailable = !connection.enabled && !selected;
+                    return (
+                      <label key={connection.id} className={`agent-mcp-option${selected ? ' selected' : ''}${unavailable ? ' disabled' : ''}`} title={connection.url}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          disabled={unavailable}
+                          onChange={() => toggleMcp(connection.name)}
+                        />
+                        <span className="agent-mcp-option-copy">
+                          <code>{connection.name}</code>
+                          <span>{connection.type} · {connection.enabled ? (connection.publishedAt ? '租户共享' : '私有') : '已停用'}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="agent-mcp-empty">暂无租户 MCP 连接。可先创建连接，或保留下面的导入名称。</div>
+              )}
+
+              <div className="agent-mcp-compatible">
+                <span>兼容名称（用于导入 Agent 的 .mcp.json）</span>
+                <div className="agent-mcp-chips">
+                  {compatibleMcpNames.map(name => (
+                    <label key={name} className={`agent-mcp-chip${form.mcpServers.includes(name) ? ' selected' : ''}`}>
+                      <input type="checkbox" checked={form.mcpServers.includes(name)} onChange={() => toggleMcp(name)} />
+                      <code>{name}</code>
+                    </label>
+                  ))}
+                </div>
+                <div className="agent-mcp-manual-row">
+                  <input
+                    value={mcpNameDraft}
+                    onChange={event => setMcpNameDraft(event.target.value)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        addManualMcp();
+                      }
                     }}
-                  >
-                    <input
-                      type="checkbox" checked={form.mcpServers.includes(srv.name)}
-                      onChange={() => toggleMcp(srv.name)}
-                      style={{ width: 'auto', margin: 0 }}
-                    />
-                    {srv.name}
-                  </label>
-                ))}
-                {liveMcp.length === 0 && (
-                  <span style={{ fontSize: '.76em', color: 'var(--ink-muted)' }}>暂无自定义 MCP 服务器，显示默认列表</span>
-                )}
+                    placeholder="手工 MCP 名称"
+                    aria-label="手工 MCP 名称"
+                  />
+                  <button type="button" className="btn btn-sm" onClick={addManualMcp}>添加名称</button>
+                </div>
               </div>
             </div>
 

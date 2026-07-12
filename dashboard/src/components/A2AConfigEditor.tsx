@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import type { A2ARemoteAgentConfig } from '../simulator/types';
 import { getAuthHeaders } from '../utils/client-runtime';
+import { mintA2ARemoteId } from '../utils/platform-mcp-tools';
 import LineIcon from './LineIcon';
 
 type A2ACredentialMetadata = {
@@ -186,7 +187,7 @@ export default function A2AConfigEditor({
   const addRemoteAgent = () => {
     onRemoteAgentsChange([
       ...remoteAgents,
-      { name: '', agentCardUrl: '', credentialRef: undefined },
+      { id: mintA2ARemoteId(), name: '', agentCardUrl: '', credentialRef: undefined },
     ]);
   };
 

@@ -120,6 +120,16 @@ import { listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, outcomeToMessageStatus, type RunOutcome } from './src/simulator/run-state.ts';
 import { mountA2ARoutes } from './server-a2a.ts';
 import { mountEvaluationRoutes } from './server-evaluations.ts';
+import { describeA2ARemoteTools } from './server-a2a-client.ts';
+import {
+  MEMORY_PLATFORM_TOOL_IDS,
+  STATIC_PLATFORM_MCP_TOOLS,
+  a2aPlatformToolId,
+  buildA2APlatformToolDescriptor,
+  isA2APlatformToolId,
+  isMemoryPlatformToolId,
+  selectedPlatformToolIds,
+} from './src/utils/platform-mcp-tools.ts';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -1528,11 +1538,10 @@ function normalizeAgentTemplateForApi(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const template = { ...(value as Record<string, unknown>) };
 
-  for (const key of ['tools', 'mcpServers', 'eventSources', 'skills', 'knowledgeSourceIds', 'datasourceIds']) {
+  for (const key of ['tools', 'mcpServers', 'eventSources', 'skills', 'knowledgeSourceIds', 'datasourceIds', 'platformMcpTools', 'disabledPlatformMcpTools']) {
     if (Array.isArray(template[key])) template[key] = normalizeStringArray(template[key]) || [];
   }
   template.visualPreprocessDefault = template.visualPreprocessDefault === true ? true : undefined;
-  template.useMemory = template.useMemory !== false;
   template.visualPreprocessModel = typeof template.visualPreprocessModel === 'string' && template.visualPreprocessModel.trim()
     ? template.visualPreprocessModel.trim()
     : undefined;
@@ -1541,13 +1550,31 @@ function normalizeAgentTemplateForApi(value: unknown): Record<string, unknown> {
     ? template.a2aRemoteAgents.flatMap((item) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
       const raw = item as Record<string, unknown>;
+      const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : crypto.randomUUID();
       const name = typeof raw.name === 'string' ? raw.name.trim() : '';
       const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
       if (!name || !agentCardUrl) return [];
       const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
-      return [{ name, agentCardUrl, ...(credentialRef ? { credentialRef } : {}) }];
+      return [{ id, name, agentCardUrl, ...(credentialRef ? { credentialRef } : {}) }];
     })
     : [];
+  const remotes = template.a2aRemoteAgents as Array<{ id: string; name: string; agentCardUrl: string; credentialRef?: string }>;
+  const knownA2ATools = new Set(remotes.map(remote => a2aPlatformToolId(remote.id)));
+  const requestedPlatformTools = Array.isArray(template.platformMcpTools)
+    ? (template.platformMcpTools as string[]).filter(toolId => isMemoryPlatformToolId(toolId) || knownA2ATools.has(toolId))
+    : undefined;
+  const disabledPlatformTools = Array.isArray(template.disabledPlatformMcpTools)
+    ? (template.disabledPlatformMcpTools as string[]).filter(toolId => isA2APlatformToolId(toolId) && knownA2ATools.has(toolId))
+    : [];
+  const platformMcpTools = selectedPlatformToolIds(
+    remotes,
+    requestedPlatformTools,
+    disabledPlatformTools,
+    template.useMemory !== false,
+  ).filter(toolId => isMemoryPlatformToolId(toolId) || knownA2ATools.has(toolId));
+  template.platformMcpTools = platformMcpTools;
+  template.disabledPlatformMcpTools = disabledPlatformTools;
+  template.useMemory = MEMORY_PLATFORM_TOOL_IDS.some(toolId => platformMcpTools.includes(toolId));
 
   if (template.subagents && typeof template.subagents === 'object' && !Array.isArray(template.subagents)) {
     const normalizedSubagents = Object.entries(template.subagents as Record<string, unknown>).flatMap(([name, agent]) => {
@@ -2116,6 +2143,7 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   const enableFileCheckpointing = req.body?.enableFileCheckpointing === true;
   const useKnowledge = req.body?.useKnowledge === true;
   const useMemory = template?.useMemory !== false && req.body?.useMemory !== false;
+  const platformMcpTools = normalizeStringArray(template?.platformMcpTools ?? req.body?.platformMcpTools);
   const knowledgeSourceIds = normalizeStringArray(req.body?.knowledgeSourceIds) || [];
   const datasourceIds = normalizeStringArray(req.body?.datasourceIds ?? template?.datasourceIds) || [];
   const skills = normalizeStringArray(req.body?.skills);
@@ -2334,6 +2362,7 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     subagents,
     skills,
     mcpServers,
+    platformMcpTools,
     a2aRemoteAgents: Array.isArray(template?.a2aRemoteAgents)
       ? template.a2aRemoteAgents as NonNullable<Parameters<typeof runAgent>[0]['a2aRemoteAgents']>
       : undefined,
@@ -2980,6 +3009,26 @@ app.get('/api/provider-models', authMiddleware, async (req: any, res) => {
 
 app.get('/api/internal-tools', authMiddleware, (_req: any, res) => {
   res.json(listInternalTools());
+});
+
+app.get('/api/platform-mcp-tools', authMiddleware, (req: any, res) => {
+  const templates = listVisibleAgentTemplates(req.auth);
+  const dynamicTools = templates.flatMap((template) => {
+    const templateId = typeof template.id === 'string' ? template.id : '';
+    const templateName = typeof template.name === 'string' ? template.name : templateId;
+    const remotes = Array.isArray(template.a2aRemoteAgents)
+      ? template.a2aRemoteAgents as Array<{ id?: string; name: string; agentCardUrl: string; credentialRef?: string }>
+      : [];
+    return describeA2ARemoteTools(remotes).flatMap((descriptor) => {
+      if (!descriptor.config.id) return [];
+      return [buildA2APlatformToolDescriptor(
+        { id: templateId, name: templateName },
+        descriptor.config as { id: string; name: string; agentCardUrl: string; credentialRef?: string },
+        descriptor.sdkToolName,
+      )];
+    });
+  });
+  res.json([...STATIC_PLATFORM_MCP_TOOLS, ...dynamicTools]);
 });
 
 app.get('/api/internal-tool-settings', authMiddleware, (req: any, res) => {
@@ -5084,6 +5133,7 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
   const skills = normalizeStringArray(tmpl?.skills);
   const mcpServers = normalizeStringArray(storedTemplate?.mcpServers || tmpl?.mcpServers);
   const useMemory = storedTemplate?.useMemory !== false && tmpl?.useMemory !== false && req.body?.useMemory !== false;
+  const platformMcpTools = normalizeStringArray(storedTemplate?.platformMcpTools ?? tmpl?.platformMcpTools);
   const selectedModel = [
     model,
     tmpl?.model,
@@ -5137,6 +5187,7 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
       subagents,
       skills,
       mcpServers,
+      platformMcpTools,
       a2aRemoteAgents: Array.isArray(storedTemplate?.a2aRemoteAgents)
         ? storedTemplate.a2aRemoteAgents as NonNullable<Parameters<typeof runAgent>[0]['a2aRemoteAgents']>
         : undefined,

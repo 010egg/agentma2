@@ -23,6 +23,8 @@ Static descriptors cover:
 
 Dynamic descriptors cover one tool for each configured A2A remote Agent. Each remote receives a persisted stable ID, and its logical tool ID is derived from that ID, for example `a2a.remote.<remoteId>`. Renaming the remote or changing its Agent Card URL does not change its selection identity.
 
+Because the stable ID is deliberately independent of every mutable field (name, Agent Card URL, order), it **cannot be recomputed** — it must be stored as a first-class field on the remote's persisted configuration and read back, never derived. The ID is therefore a new required field on each `a2aRemoteAgents` entry, and template normalization must preserve it (see Persistence And Migration). It is a randomly minted opaque value (e.g. a UUID), not a hash of any remote field.
+
 Each descriptor includes enough metadata for both catalog display and runtime mapping:
 
 - logical tool ID;
@@ -45,6 +47,8 @@ Agent templates gain a `platformMcpTools` field containing stable logical tool I
 - present and non-empty: exact selected tools;
 - present and empty: the user explicitly disabled every platform MCP tool.
 
+"Exact selected tools" applies literally to the **static** platform tools (the two memory tools), which the editor always renders as explicit checkboxes: an absent memory ID means deselected. Dynamic A2A tools remain default-on when added out-of-band: a configured remote whose ID is absent from `platformMcpTools` is selected unless its logical tool ID appears in `disabledPlatformMcpTools`. The latter is an explicit-disable tombstone set and only accepts A2A tool IDs. This extra state is required because a missing ID cannot simultaneously mean both default-on and explicitly disabled.
+
 The existing general `tools` array remains responsible for SDK built-ins and the current internal/custom tool selection. Platform MCP selection is stored separately so legacy absence is distinguishable from an explicit empty selection.
 
 Migration rules are applied while normalizing a template:
@@ -52,9 +56,17 @@ Migration rules are applied while normalizing a template:
 - For a legacy template with `useMemory !== false`, select both memory tools.
 - For a legacy template with `useMemory === false`, select neither memory tool.
 - Select every existing A2A remote Agent tool in a legacy template, preserving current behavior.
-- Assign stable IDs to legacy A2A remotes that do not have one. The normalized template keeps those IDs, and the next successful save persists them.
-- Ignore removed A2A remote IDs when normalizing selections.
+- **Preserve and mint the stable ID during A2A normalization.** The existing `a2aRemoteAgents` normalization rebuilds each entry into a fixed shape (currently `{ name, agentCardUrl, credentialRef? }`) and drops any other field; it must be extended to carry `id` through unchanged, and to mint a fresh opaque ID for any entry missing one. Without this, every save silently strips the ID and orphans every `platformMcpTools` reference. The minted ID and any selection referencing it must be written in the **same** save (see Stable Remote ID Invariants).
+- **Default-select a configured remote whose ID is absent from `platformMcpTools` and `disabledPlatformMcpTools`.** Migration's "select all A2A" covers legacy templates, while the tombstone lets an explicit editor action persist a disabled remote without making ordinary partial saves dangerous.
+- Ignore removed A2A remote IDs when normalizing selections (selection references a remote no longer in `a2aRemoteAgents`).
+- Prune tombstones for removed remotes, and reject non-A2A IDs in `disabledPlatformMcpTools`.
 - Save the new exact selection format on the next template update.
+
+### Stable Remote ID Invariants
+
+- IDs are minted at normalization for any remote lacking one, and are always persisted together with (never after) any selection that references them, in one atomic template write.
+- Reading a legacy template (missing `platformMcpTools`) always re-derives a select-all result from the current remotes; it never emits a stored selection that references a not-yet-persisted ID. This makes a run-without-save followed by a reload idempotent even though each read may mint transient IDs, because no read persists a reference to a transient ID.
+- A minted ID becomes authoritative only after the first successful save that transitions the template from legacy to `platformMcpTools`-present; that save writes the IDs onto the remotes and the derived (or user-adjusted) selection together.
 
 The legacy `useMemory` field remains readable for backward compatibility. Once `platformMcpTools` is present, it is authoritative. When templates are saved, write `useMemory: true` when either memory tool is selected and `useMemory: false` when both are disabled, so older consumers receive a consistent coarse value.
 
@@ -119,6 +131,8 @@ Add focused coverage for:
 - all four memory selection combinations;
 - legacy `useMemory` migration for enabled and disabled templates;
 - legacy A2A remotes receiving stable IDs and default selections;
+- stable IDs surviving a full normalize→save→reload cycle (regression guard: normalization must not strip `id` from `a2aRemoteAgents`);
+- a configured remote whose ID is absent from a present, non-empty `platformMcpTools` remaining selected after a memory-only or otherwise partial save (drift default-select), versus an explicit editor removal deselecting it;
 - A2A add, remove, rename, reorder, and Card URL edits preserving the intended selection;
 - cross-template and unknown tool selection rejection;
 - runtime MCP registration containing only selected memory and A2A tools;
@@ -130,6 +144,14 @@ Add focused coverage for:
 Run the existing Agent template, memory, A2A, and bidirectional A2A smoke tests. Add a dedicated platform MCP selection smoke test if the existing suites do not cover persistence through an API save and a real runtime invocation.
 
 Complete browser verification for the tool catalog and Agent editor at desktop and mobile widths, checking wrapping, overflow, disabled states, and selection synchronization.
+
+## Coordination
+
+Two in-flight efforts touch the same A2A runtime seam; sequence and compose rather than each wrapping the call site independently.
+
+- **A2A outbound observability** (`docs/superpowers/plans/2026-07-12-a2a-outbound-observability-implementation.md`) adds a `recorder` parameter to `callA2ARemote` and persists a row per outbound call. Its correlation key should be the **stable `remoteId` this spec introduces**, not the mutable `agent_name` — carry `remoteId` into the outbound record so a call can be traced back to a specific configured remote across renames. Add `remote_id` alongside `agent_name` in the outbound table when both land.
+- Both efforts modify `buildA2ARemoteMcp` / `describeA2ARemoteTools` and the point where configured remotes are turned into runtime tools. This spec's **selection filter** (only pass selected remotes to `buildA2ARemoteMcp`) and the observability plan's **recorder wiring** wrap the same `callA2ARemote` invocation; land them in one coordinated change so the filter runs before the recorder and neither re-wraps the other.
+- `server-a2a-client.ts` is under active edit; whichever effort lands first should expose the shared seam (stable-ID-keyed descriptor + recorder pass-through) the other consumes, to avoid a merge that double-wraps or drops the ID.
 
 ## Out Of Scope
 

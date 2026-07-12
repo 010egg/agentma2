@@ -475,8 +475,15 @@ Content-Type: application/json
 ```json
 {
   "a2aPublished": true,
+  "platformMcpTools": [
+    "memory.recall",
+    "memory.remember",
+    "a2a.remote.3ec380c5-4f41-46c5-9af1-499d3e21c62d"
+  ],
+  "disabledPlatformMcpTools": [],
   "a2aRemoteAgents": [
     {
+      "id": "3ec380c5-4f41-46c5-9af1-499d3e21c62d",
       "name": "researcher",
       "agentCardUrl": "https://remote.example/.well-known/agent-card.json",
       "credentialRef": "tenant-credential-id"
@@ -485,7 +492,13 @@ Content-Type: application/json
 }
 ```
 
-每个模板最多配置 16 个远程 Agent。`name` 是可选的本地别名：编辑器会通过 `GET /api/a2a/discover?url=...` 安全读取 Card 名称并自动填充；留空保存时服务端会根据 URL 生成稳定名称。别名支持中文，在模板内不区分大小写唯一，运行时会转换为符合工具协议限制的稳定 ASCII 工具名。生产 Card URL 必须为 HTTPS，且不得在 URL 中嵌入用户名或密码。`AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1` 只为本地开发允许 loopback HTTP；Card 和选出的 RPC URL 仍会经过 DNS、地址固定、重定向、字节和超时限制。
+每个模板最多配置 16 个远程 Agent。`id` 是服务端或编辑器铸造并持久化的稳定 opaque ID，改名、修改 Card URL 或排序时不得重算。`name` 是可选的本地别名：编辑器会通过 `GET /api/a2a/discover?url=...` 安全读取 Card 名称并自动填充；留空保存时服务端会根据 URL 生成显示名称。别名支持中文，在模板内不区分大小写唯一，运行时会转换为符合工具协议限制的 ASCII 工具名。生产 Card URL 必须为 HTTPS，且不得在 URL 中嵌入用户名或密码。`AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1` 只为本地开发允许 loopback HTTP；Card 和选出的 RPC URL 仍会经过 DNS、地址固定、重定向、字节和超时限制。
+
+`platformMcpTools` 精确选择平台 MCP 工具。新模板默认包含 `memory.recall` 和 `memory.remember`；远程 A2A 工具 ID 为 `a2a.remote.<remoteId>`。动态 A2A 工具默认开启，因此显式关闭时还要把 ID 写入 `disabledPlatformMcpTools`；删除远程配置后服务端会清理对应选择和 tombstone。旧模板缺少这些字段时按 `useMemory` 和现有远程配置迁移。
+
+### 平台 MCP 工具目录
+
+`GET /api/platform-mcp-tools` 返回当前用户可见的静态记忆工具和模板范围内的 A2A 动态工具描述符。响应包含逻辑 ID、SDK 工具名、MCP server、schema、annotations、scope，以及 A2A 工具的 `templateId`、`templateName` 和 `remoteId`。该目录为只读定义，Agent 模板通过 `platformMcpTools` 选择运行时能力。
 
 ### A2A 远程凭据
 
@@ -648,7 +661,51 @@ Content-Type: application/json
 
 管理员更新本租户发布的公共技能。传入 `path` 或 `skillName` 时会复制新的技能包并递增 `revision`；只改 `name`、`description` 或 `slug` 时只更新公共目录信息。
 
-## 12. 事件与部署
+## 12. MCP 连接
+
+所有接口都需要登录。普通用户只能看到自己创建的连接和租户内已发布连接；租户管理员可查看全部连接。响应中的认证 header 永远是打码值。
+
+### `GET /api/mcp-connections`
+
+列出当前用户可见的 MCP 连接。
+
+### `POST /api/mcp-connections`
+
+创建私有连接。请求体：
+
+```json
+{
+  "name": "mydb",
+  "url": "https://mcp.example.com/mcp",
+  "type": "http",
+  "headers": { "Authorization": "Bearer token" },
+  "description": "只读分析库"
+}
+```
+
+`name` 也是工具前缀 `mcp__<name>__*`。每租户最多 20 个连接。URL 默认必须是 HTTPS，并经过 DNS 与私网地址校验。
+
+### `PATCH /api/mcp-connections/:id`
+
+更新自己创建的连接，租户管理员可更新任意连接。省略 `headers` 时保留原值；传空对象时清除认证 header。
+
+### `DELETE /api/mcp-connections/:id`
+
+删除连接。模板中的同名值不会自动删除，以保留导入 Agent 的 `.mcp.json` 兼容语义。
+
+### `POST /api/mcp-connections/:id/publish`
+
+发布连接。发布即共享创建者配置的认证能力，租户内其他用户运行引用该连接的 Agent 时会使用同一组 header。
+
+### `POST /api/mcp-connections/:id/unpublish`
+
+取消发布。其他用户后续运行引用该连接的 Agent 时会跳过连接并收到 run warning。
+
+### `POST /api/mcp-connections/:id/check`
+
+执行 10 秒 MCP initialize + `tools/list` 测试，返回服务器信息和最多 100 个工具的名称/描述。错误响应会过滤认证 header。
+
+## 13. 事件与部署
 
 这部分接口主要服务当前站内的 MCP/事件桥接，不是稳定公开 API。
 

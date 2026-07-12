@@ -1,4 +1,4 @@
-import { Routes, Route } from 'react-router-dom';
+import { Navigate, Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import AuthGuard from './components/AuthGuard';
 import Layout from './components/Layout';
@@ -41,6 +41,7 @@ export default function App() {
                 <Route path="/sessions" element={<Sessions />} />
                 <Route path="/tools" element={<Tools />} />
                 <Route path="/knowledge" element={<Knowledge />} />
+                <Route path="/mcp-connections" element={<Navigate to="/tools?tab=mcp" replace />} />
                 <Route path="/viz" element={<VizPreview />} />
                 <Route path="/visuals" element={<Visuals />} />
                 <Route path="/skills" element={<Skills />} />

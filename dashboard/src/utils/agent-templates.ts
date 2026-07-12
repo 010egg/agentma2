@@ -1,5 +1,13 @@
 import type { A2ARemoteAgentConfig, AgentDefinition, AgentTemplate, EffortLevel, PermissionMode, ProviderConfig } from '../simulator/types';
 import { getAuthHeaders } from './client-runtime';
+import {
+  MEMORY_PLATFORM_TOOL_IDS,
+  a2aPlatformToolId,
+  isA2APlatformToolId,
+  isMemoryPlatformToolId,
+  mintA2ARemoteId,
+  selectedPlatformToolIds,
+} from './platform-mcp-tools';
 
 const LEGACY_CACHE_KEY = 'agentma_templates';
 const CACHE_KEY_PREFIX = 'agentma_templates:';
@@ -75,12 +83,30 @@ function normalizeA2ARemoteAgents(value: unknown): A2ARemoteAgentConfig[] {
   return value.flatMap((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
     const raw = item as Record<string, unknown>;
+    const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : mintA2ARemoteId();
     const name = typeof raw.name === 'string' ? raw.name.trim() : '';
     const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
     if (!agentCardUrl) return [];
     const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
-    return [{ name, agentCardUrl, credentialRef: credentialRef || undefined }];
+    return [{ id, name, agentCardUrl, credentialRef: credentialRef || undefined }];
   });
+}
+
+function normalizePlatformMcpSelection(raw: Record<string, unknown>, remotes: A2ARemoteAgentConfig[]) {
+  const knownA2ATools = new Set(remotes.map(remote => a2aPlatformToolId(remote.id)));
+  const requested = Array.isArray(raw.platformMcpTools)
+    ? normalizeStringArray(raw.platformMcpTools).filter(toolId => isMemoryPlatformToolId(toolId) || knownA2ATools.has(toolId))
+    : undefined;
+  const disabled = normalizeStringArray(raw.disabledPlatformMcpTools).filter(toolId => (
+    isA2APlatformToolId(toolId) && knownA2ATools.has(toolId)
+  ));
+  const selected = selectedPlatformToolIds(remotes, requested, disabled, raw.useMemory !== false)
+    .filter(toolId => isMemoryPlatformToolId(toolId) || knownA2ATools.has(toolId));
+  return {
+    platformMcpTools: selected,
+    disabledPlatformMcpTools: disabled,
+    useMemory: MEMORY_PLATFORM_TOOL_IDS.some(toolId => selected.includes(toolId)),
+  };
 }
 
 function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
@@ -96,6 +122,9 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
   const permissionMode = typeof raw.permissionMode === 'string' ? raw.permissionMode as PermissionMode : 'default';
   const maxTurns = Number(raw.maxTurns);
   const tools = normalizeStringArray(raw.tools);
+
+  const a2aRemoteAgents = normalizeA2ARemoteAgents(raw.a2aRemoteAgents);
+  const platformSelection = normalizePlatformMcpSelection(raw, a2aRemoteAgents);
 
   return {
     id,
@@ -118,13 +147,15 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
     enableFileCheckpointing: raw.enableFileCheckpointing === true ? true : undefined,
     useKnowledge: raw.useKnowledge === true ? true : undefined,
     knowledgeSourceIds: normalizeStringArray(raw.knowledgeSourceIds),
-    useMemory: raw.useMemory !== false,
+    useMemory: platformSelection.useMemory,
+    platformMcpTools: platformSelection.platformMcpTools,
+    disabledPlatformMcpTools: platformSelection.disabledPlatformMcpTools,
     visualPreprocessDefault: raw.visualPreprocessDefault === true ? true : undefined,
     visualPreprocessModel: typeof raw.visualPreprocessModel === 'string' && raw.visualPreprocessModel.trim()
       ? raw.visualPreprocessModel.trim()
       : undefined,
     a2aPublished: raw.a2aPublished === true,
-    a2aRemoteAgents: normalizeA2ARemoteAgents(raw.a2aRemoteAgents),
+    a2aRemoteAgents,
     seedDir: typeof raw.seedDir === 'string' && raw.seedDir.trim() ? raw.seedDir : undefined,
     popularity: normalizePopularity(raw.popularity),
     createdBy: typeof raw.createdBy === 'string' && raw.createdBy.trim() ? raw.createdBy : null,
@@ -274,6 +305,9 @@ function createVizAgentTemplate(model: string): AgentTemplate {
     maxTurns: 50,
     permissionMode: 'default',
     knowledgeSourceIds: [],
+    useMemory: true,
+    platformMcpTools: [...MEMORY_PLATFORM_TOOL_IDS],
+    disabledPlatformMcpTools: [],
     a2aPublished: false,
     a2aRemoteAgents: [],
     createdAt: now,

@@ -32,6 +32,8 @@
     "smoke:user-plan-quotas": "node scripts/smoke-user-plan-quotas.mjs",
     "smoke:permission-rules": "node scripts/smoke-permission-rules.mjs",
     "smoke:memory-stats": "tsx scripts/smoke-memory-stats.mjs",
+    "smoke:platform-mcp-tools": "AGENTMA_SMOKE_START_SERVER=1 node scripts/smoke-a2a-template-config.mjs",
+    "smoke:mcp-connections": "tsx scripts/smoke-mcp-connections.mjs",
     "smoke:evaluations": "tsx scripts/smoke-evaluations.mjs",
     "smoke:evaluations-api": "node scripts/smoke-evaluations-api.mjs",
     "smoke:douyin-resolve": "tsx scripts/smoke-douyin-resolve.mjs",
@@ -45,6 +47,7 @@
   "dependencies": {
     "@a2a-js/sdk": "1.0.0-beta.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.156",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dompurify": "^3.4.8",

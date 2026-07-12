@@ -17,6 +17,12 @@ import {
   type ChatMessageStatus,
   type RunOutcome,
 } from './src/simulator/run-state.ts';
+import {
+  MEMORY_PLATFORM_TOOL_IDS,
+  a2aPlatformToolId,
+  isA2APlatformToolId,
+  isMemoryPlatformToolId,
+} from './src/utils/platform-mcp-tools.ts';
 
 export type Role = 'tenant_admin' | 'team_admin' | 'member';
 export type UserPlanTier = 'free' | 'plus' | 'pro' | 'max';
@@ -4397,6 +4403,7 @@ export function updateInternalToolSetting(
 const MAX_A2A_REMOTE_AGENTS = 16;
 const MAX_A2A_REMOTE_NAME_LENGTH = 64;
 const MAX_A2A_CARD_URL_BYTES = 2048;
+const MAX_MCP_SERVERS_PER_TEMPLATE = 8;
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS agent_templates (
@@ -4436,6 +4443,32 @@ function agentTemplateValidationError(message: string) {
   return Object.assign(new Error(message), { status: 400 });
 }
 
+function normalizeStoredMcpServers(value: unknown) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw agentTemplateValidationError('mcpServers must be an array');
+  const names = Array.from(new Set(value.flatMap((item) => {
+    const name = typeof item === 'string' ? item.trim() : '';
+    if (!name) return [];
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(name)) {
+      throw agentTemplateValidationError(`invalid MCP server name: ${name}`);
+    }
+    return [name];
+  })));
+  if (names.length > MAX_MCP_SERVERS_PER_TEMPLATE) {
+    throw agentTemplateValidationError(`mcpServers supports at most ${MAX_MCP_SERVERS_PER_TEMPLATE} entries`);
+  }
+  return names;
+}
+
+function normalizeStoredStringArray(value: unknown, field: string) {
+  if (!Array.isArray(value)) throw agentTemplateValidationError(`${field} must be an array`);
+  return Array.from(new Set(value.flatMap((item) => {
+    if (typeof item !== 'string') throw agentTemplateValidationError(`${field} must contain strings`);
+    const normalized = item.trim();
+    return normalized ? [normalized] : [];
+  })));
+}
+
 function isLoopbackA2AHostname(hostname: string) {
   const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
@@ -4459,12 +4492,20 @@ function normalizeStoredA2ARemoteAgents(tenantId: string, value: unknown) {
     SELECT id FROM a2a_credentials WHERE tenant_id = ?
   `).all(tenantId) as Array<{ id: string }>).map((row) => String(row.id)));
   const seenNames = new Set<string>();
+  const seenIds = new Set<string>();
 
   return value.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       throw agentTemplateValidationError(`a2aRemoteAgents[${index}] must be an object`);
     }
     const raw = item as Record<string, unknown>;
+    const suppliedId = typeof raw.id === 'string' ? raw.id.trim() : '';
+    const id = suppliedId || crypto.randomUUID();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(id)) {
+      throw agentTemplateValidationError(`a2aRemoteAgents[${index}].id must be an opaque identifier`);
+    }
+    if (seenIds.has(id)) throw agentTemplateValidationError(`duplicate A2A remote Agent id: ${id}`);
+    seenIds.add(id);
     const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
     if (!agentCardUrl || Buffer.byteLength(agentCardUrl, 'utf8') > MAX_A2A_CARD_URL_BYTES) {
       throw agentTemplateValidationError(`a2aRemoteAgents[${index}].agentCardUrl is required and must not exceed ${MAX_A2A_CARD_URL_BYTES} bytes`);
@@ -4508,11 +4549,67 @@ function normalizeStoredA2ARemoteAgents(tenantId: string, value: unknown) {
       throw agentTemplateValidationError(`a2aRemoteAgents[${index}].credentialRef is not available in this tenant`);
     }
     return {
+      id,
       name,
       agentCardUrl,
       ...(credentialRef ? { credentialRef } : {}),
     };
   });
+}
+
+function normalizeStoredPlatformMcpSelection(
+  template: Record<string, unknown>,
+  existing: Record<string, unknown> | null,
+  remotes: Array<{ id: string }>,
+) {
+  const inheritedSelection = template.platformMcpTools === undefined
+    ? existing?.platformMcpTools
+    : template.platformMcpTools;
+  const inheritedDisabled = template.disabledPlatformMcpTools === undefined
+    ? existing?.disabledPlatformMcpTools
+    : template.disabledPlatformMcpTools;
+  const requested = inheritedSelection === undefined
+    ? null
+    : normalizeStoredStringArray(inheritedSelection, 'platformMcpTools');
+  const disabledRequested = inheritedDisabled === undefined
+    ? []
+    : normalizeStoredStringArray(inheritedDisabled, 'disabledPlatformMcpTools');
+  const knownA2ATools = new Set(remotes.map(remote => a2aPlatformToolId(remote.id)));
+
+  const validateToolId = (toolId: string, field: string) => {
+    if (isMemoryPlatformToolId(toolId) || knownA2ATools.has(toolId)) return true;
+    if (isA2APlatformToolId(toolId)) return false;
+    throw agentTemplateValidationError(`${field} contains unknown platform MCP tool: ${toolId}`);
+  };
+  const disabledPlatformMcpTools = disabledRequested.filter(toolId => {
+    if (!isA2APlatformToolId(toolId)) {
+      throw agentTemplateValidationError(`disabledPlatformMcpTools only accepts A2A tools: ${toolId}`);
+    }
+    return validateToolId(toolId, 'disabledPlatformMcpTools');
+  });
+  const disabled = new Set(disabledPlatformMcpTools);
+  const selected = new Set<string>();
+
+  if (requested === null) {
+    const legacyUseMemory = template.useMemory !== undefined ? template.useMemory !== false : existing?.useMemory !== false;
+    if (legacyUseMemory) for (const toolId of MEMORY_PLATFORM_TOOL_IDS) selected.add(toolId);
+  } else {
+    for (const toolId of requested) {
+      if (validateToolId(toolId, 'platformMcpTools')) selected.add(toolId);
+    }
+  }
+
+  for (const toolId of knownA2ATools) {
+    if (disabled.has(toolId)) selected.delete(toolId);
+    else selected.add(toolId);
+  }
+
+  const platformMcpTools = Array.from(selected);
+  return {
+    platformMcpTools,
+    disabledPlatformMcpTools,
+    useMemory: MEMORY_PLATFORM_TOOL_IDS.some(toolId => selected.has(toolId)),
+  };
 }
 
 function canManageAgentTemplate(template: Record<string, unknown>, actorSub?: string | null, actorRole?: Role | null) {
@@ -4546,6 +4643,8 @@ function normalizeStoredAgentTemplate(
     ? existingCreatedBy ?? actorSub ?? null
     : actorSub ?? (typeof template.createdBy === 'string' ? template.createdBy : null);
   const a2aRemoteAgents = normalizeStoredA2ARemoteAgents(tenantId, template.a2aRemoteAgents);
+  const mcpServers = normalizeStoredMcpServers(template.mcpServers);
+  const platformSelection = normalizeStoredPlatformMcpSelection(template, existing, a2aRemoteAgents);
   return {
     ...template,
     id,
@@ -4556,6 +4655,10 @@ function normalizeStoredAgentTemplate(
     deletedAt,
     a2aPublished: template.a2aPublished === true,
     a2aRemoteAgents,
+    mcpServers,
+    useMemory: platformSelection.useMemory,
+    platformMcpTools: platformSelection.platformMcpTools,
+    disabledPlatformMcpTools: platformSelection.disabledPlatformMcpTools,
     createdAt,
     updatedAt,
   };

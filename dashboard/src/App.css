@@ -3414,6 +3414,87 @@ label {
 .agent-card-desc { font-size: .8em; color: var(--ink-secondary); margin-top: 4px; line-height: 1.5; }
 .agent-card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 
+.agent-platform-tools-head {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: .72em;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-platform-tools-head a {
+  color: var(--ink-muted);
+  font-weight: 500;
+  text-transform: none;
+}
+
+.agent-platform-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.agent-platform-tool {
+  min-width: 0;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.agent-platform-tool.selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--ink);
+}
+
+.agent-platform-tool input {
+  width: auto;
+  margin: 0;
+}
+
+.agent-platform-tool > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-platform-tool strong,
+.agent-platform-tool code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-platform-tool strong {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.agent-platform-tool code,
+.agent-platform-tool small {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+}
+
+.agent-platform-tool small {
+  white-space: nowrap;
+}
+
 .agents-market-sections {
   display: grid;
   gap: 18px;
@@ -6452,6 +6533,10 @@ tr:hover td {
 }
 
 @media (max-width: 760px) {
+  .agent-platform-tools {
+    grid-template-columns: 1fr;
+  }
+
   .main-content.cosmic .content-surface {
     padding: 10px 8px 12px;
   }

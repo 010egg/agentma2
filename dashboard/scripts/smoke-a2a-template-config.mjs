@@ -196,6 +196,8 @@ async function main() {
     const storedConfigured = adminList.find(item => item.id === configured.id);
     const storedLegacy = adminList.find(item => item.id === legacy.id);
     const storedUrlOnly = adminList.find(item => item.id === urlOnly.id);
+    const configuredRemoteId = storedConfigured?.a2aRemoteAgents?.[0]?.id;
+    const configuredRemoteToolId = configuredRemoteId ? `a2a.remote.${configuredRemoteId}` : '';
 
     const tampered = {
       ...storedConfigured,
@@ -239,6 +241,33 @@ async function main() {
     const afterClone = await requireOk('list after clone', fetchJson(`${baseUrl}/api/agents`, { headers: adminHeaders }));
     const storedClone = afterClone.find(item => item.id === cloned.id);
 
+    const driftSave = afterClone.map(item => item.id === configured.id ? {
+      ...item,
+      platformMcpTools: ['memory.recall', 'memory.remember'],
+      disabledPlatformMcpTools: [],
+      updatedAt: Date.now(),
+    } : item);
+    const afterDriftSave = await requireOk('default-select drifted A2A tool', fetchJson(`${baseUrl}/api/agents`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify(driftSave),
+    }));
+    const driftedConfigured = afterDriftSave.find(item => item.id === configured.id);
+
+    const explicitDisableSave = afterDriftSave.map(item => item.id === configured.id ? {
+      ...item,
+      platformMcpTools: ['memory.recall', 'memory.remember'],
+      disabledPlatformMcpTools: [configuredRemoteToolId],
+      updatedAt: Date.now(),
+    } : item);
+    const afterExplicitDisable = await requireOk('explicitly disable A2A tool', fetchJson(`${baseUrl}/api/agents`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify(explicitDisableSave),
+    }));
+    const explicitlyDisabledConfigured = afterExplicitDisable.find(item => item.id === configured.id);
+    const platformCatalog = await requireOk('list platform MCP tools', fetchJson(`${baseUrl}/api/platform-mcp-tools`, { headers: adminHeaders }));
+
     const duplicateNames = await fetchJson(`${baseUrl}/api/agents`, {
       method: 'PUT',
       headers: adminHeaders,
@@ -273,14 +302,43 @@ async function main() {
         })),
       })]),
     });
+    const unknownPlatformTool = await fetchJson(`${baseUrl}/api/agents`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify([template('bad-platform-tool', 'Bad Platform Tool', {
+        platformMcpTools: ['memory.recall', 'platform.unknown'],
+      })]),
+    });
+    const duplicateRemoteIds = await fetchJson(`${baseUrl}/api/agents`, {
+      method: 'PUT',
+      headers: adminHeaders,
+      body: JSON.stringify([template('bad-remote-ids', 'Bad Remote IDs', {
+        a2aRemoteAgents: [
+          { id: 'same-remote-id', name: 'One', agentCardUrl: 'https://one.example/card' },
+          { id: 'same-remote-id', name: 'Two', agentCardUrl: 'https://two.example/card' },
+        ],
+      })]),
+    });
 
-    const apiPayload = JSON.stringify({ adminList, memberOptions, afterClone });
+    const apiPayload = JSON.stringify({ adminList, memberOptions, afterClone, afterExplicitDisable, platformCatalog });
     const checks = {
       legacyDefaults: storedLegacy?.a2aPublished === false && Array.isArray(storedLegacy?.a2aRemoteAgents) && storedLegacy.a2aRemoteAgents.length === 0,
+      legacyMemoryDefaults: storedLegacy?.platformMcpTools?.includes('memory.recall')
+        && storedLegacy?.platformMcpTools?.includes('memory.remember'),
       configuredRoundTrip: storedConfigured?.a2aPublished === true
         && storedConfigured?.a2aRemoteAgents?.[0]?.name === '中文研究员'
         && storedConfigured?.a2aRemoteAgents?.[0]?.credentialRef === credential.id
+        && typeof configuredRemoteId === 'string'
+        && storedConfigured?.platformMcpTools?.includes(configuredRemoteToolId)
         && !('secret' in storedConfigured.a2aRemoteAgents[0]),
+      stableRemoteIdRoundTrip: driftedConfigured?.a2aRemoteAgents?.[0]?.id === configuredRemoteId
+        && explicitlyDisabledConfigured?.a2aRemoteAgents?.[0]?.id === configuredRemoteId,
+      driftDefaultsA2AOn: driftedConfigured?.platformMcpTools?.includes(configuredRemoteToolId),
+      explicitA2AOffPersists: !explicitlyDisabledConfigured?.platformMcpTools?.includes(configuredRemoteToolId)
+        && explicitlyDisabledConfigured?.disabledPlatformMcpTools?.includes(configuredRemoteToolId),
+      platformCatalogIncludesMemoryAndA2A: platformCatalog.some(item => item.id === 'memory.recall')
+        && platformCatalog.some(item => item.id === 'memory.remember')
+        && platformCatalog.some(item => item.id === configuredRemoteToolId && item.templateId === configured.id),
       urlOnlyNameDefaulted: storedUrlOnly?.a2aRemoteAgents?.[0]?.name === 'url-only.example',
       credentialOptionsForManager: memberOptions.some(item => item.id === credential.id && item.name === credential.name),
       noCredentialLeak: !apiPayload.includes(credentialSecret) && !apiPayload.includes('secret_ciphertext'),
@@ -291,6 +349,8 @@ async function main() {
       insecureUrlRejected: insecureUrl.response.status === 400,
       unknownCredentialRejected: unknownCredential.response.status === 400,
       arrayLimitRejected: tooManyRemotes.response.status === 400,
+      unknownPlatformToolRejected: unknownPlatformTool.response.status === 400,
+      duplicateRemoteIdsRejected: duplicateRemoteIds.response.status === 400,
     };
 
     console.log(JSON.stringify({ ok: true, checks }));

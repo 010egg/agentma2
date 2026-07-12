@@ -54,7 +54,9 @@ Agent 模板可在编辑器中显式开启 A2A 发布。每个已发布模板提
 
 RPC 请求必须同时发送 `Authorization: Bearer <AgentMa API Key>`、`A2A-Version: 1.0` 和 `Content-Type: application/json`。网页登录 JWT 不可用于该入口。支持发送/流式发送消息、任务查询与列表、任务事件重连和取消；权限或问题交互会进入 `TASK_STATE_INPUT_REQUIRED`，通过同一 `taskId` 与 `contextId` 再次发送消息后恢复。
 
-模板也可配置最多 16 个远程 A2A Agent。运行时它们会作为受限 MCP 工具注入，远程 Card/RPC 只支持 A2A 1.0 JSON-RPC，并统一经过下述出站 URL 防护。
+模板也可配置最多 16 个远程 A2A Agent。运行时它们会作为受限 MCP 工具注入，远程 Card/RPC 只支持 A2A 1.0 JSON-RPC，并统一经过下述出站 URL 防护。这里的 MCP 只是本地 Claude Agent SDK 适配层，不参与 A2A 的 Agent Card 发现或 JSON-RPC 传输。
+
+工具目录会统一展示平台 MCP 工具：`memory.recall`、`memory.remember` 对新 Agent 默认启用；每个远程 A2A Agent 生成一个只属于该模板的动态工具，添加时默认启用，并可在 Agent 编辑器中单独关闭。
 
 在 Agent 编辑器中添加远程 Agent 时只需填写 Card URL；系统会安全读取 Card 名称并自动填充。名称是可选的本地别名，支持中文，并会转换为稳定、符合工具协议限制的内部名称。
 
@@ -85,6 +87,16 @@ A2A 远程 Agent 的 Bearer 凭据使用 AES-256-GCM 加密后写入 SQLite。�
 - 未配置环境变量时，自动创建 `~/Library/Application Support/agentma2/a2a-credential-key`，权限为 `0600`。
 
 备份数据库时必须同时备份该主密钥文件。主密钥丢失后，已有远程凭据无法恢复；密钥和数据库也不应存放在同一个公开备份中。
+
+## 租户 MCP 连接
+
+租户可以在“工具 → MCP 连接”页签自助添加远程 Streamable HTTP 或 SSE MCP。认证 header 使用 AES-256-GCM 加密后写入 SQLite，运行时只通过 Agent SDK 的 `mcpServers` options 注入，不写入租户 workspace、`.mcp.json` 或 run 环境变量。
+
+- `AGENTMA_SECRETS_KEY`：必需于保存认证 header，值为 base64 编码的 32 字节密钥。未配置时仍可创建无认证连接，但保存带 header 的连接会失败。
+- `AGENTMA_MCP_ALLOW_HTTP=1`：允许 HTTP URL，仅供开发或受控内网部署。
+- `AGENTMA_MCP_HOST_ALLOWLIST`：逗号分隔的主机名/IP，显式允许私网 MCP 主机。未列入的私网、回环、链路本地地址默认拒绝。
+
+数据库接入的三条路径、远程 MCP 操作步骤与安全边界见 [`docs/mcp-connections.md`](./docs/mcp-connections.md)。
 
 ## 抖音受控浏览器
 

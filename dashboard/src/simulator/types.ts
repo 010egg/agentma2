@@ -394,6 +394,7 @@ export interface StreamEvent {
 
 // --- Agent 模板 ---
 export interface A2ARemoteAgentConfig {
+  id: string;
   name: string;
   agentCardUrl: string;
   credentialRef?: string;
@@ -424,6 +425,10 @@ export interface AgentTemplate {
   knowledgeSourceIds?: string[];
   // 长期记忆：默认开启；false 时不注入索引，也不暴露 recall/remember 工具。
   useMemory?: boolean;
+  // 平台内建 MCP 工具的精确选择；缺失表示旧模板，需要按兼容规则迁移。
+  platformMcpTools?: string[];
+  // 动态 A2A 工具默认开启；这里只记录用户显式关闭的 tombstone。
+  disabledPlatformMcpTools?: string[];
   // 视觉预处理：开启后图片先由独立视觉模型识别，再把结果交给 agent。
   visualPreprocessDefault?: boolean;
   visualPreprocessModel?: string;

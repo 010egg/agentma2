@@ -103,6 +103,25 @@ try {
 
   assert.equal(agent.shouldEnableMemoryForRun({ tenantId: 'tenant', sub: 'user' }), true, 'ordinary runs default memory on');
   assert.equal(agent.shouldEnableMemoryForRun({ tenantId: 'tenant', sub: 'user', useMemory: false }), false, 'ordinary runs can disable memory');
+  assert.deepEqual(agent.memoryCapabilitiesForRun({ tenantId: 'tenant', sub: 'user' }), { recall: true, remember: true });
+  assert.deepEqual(agent.memoryCapabilitiesForRun({ tenantId: 'tenant', sub: 'user', platformMcpTools: ['memory.recall'] }), { recall: true, remember: false });
+  assert.deepEqual(agent.memoryCapabilitiesForRun({ tenantId: 'tenant', sub: 'user', platformMcpTools: ['memory.remember'] }), { recall: false, remember: true });
+  assert.deepEqual(agent.memoryCapabilitiesForRun({ tenantId: 'tenant', sub: 'user', platformMcpTools: [] }), { recall: false, remember: false });
+  assert.match(memory.buildMemorySystemPrompt('# index', { recall: true, remember: false }), /mcp__memory__recall/);
+  assert.doesNotMatch(memory.buildMemorySystemPrompt('# index', { recall: true, remember: false }), /mcp__memory__remember/);
+  assert.match(memory.buildMemorySystemPrompt('', { recall: false, remember: true }), /mcp__memory__remember/);
+  assert.doesNotMatch(memory.buildMemorySystemPrompt('', { recall: false, remember: true }), /memory_index/);
+
+  const remotes = [
+    { id: 'remote-one', name: 'One', agentCardUrl: 'https://one.example/card' },
+    { id: 'remote-two', name: 'Two', agentCardUrl: 'https://two.example/card' },
+  ];
+  assert.equal(agent.a2aRemotesForRun({ a2aRemoteAgents: remotes }).length, 2, 'legacy runtime exposes all configured A2A remotes');
+  assert.deepEqual(
+    agent.a2aRemotesForRun({ a2aRemoteAgents: remotes, platformMcpTools: ['a2a.remote.remote-two'] }).map(item => item.id),
+    ['remote-two'],
+    'runtime exposes only selected A2A remotes',
+  );
 
   console.log('memory recall smoke passed');
 } finally {
