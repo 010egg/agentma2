@@ -392,7 +392,112 @@ Owner 删除会话及其全部消息。
 
 ### `DELETE /api/api-keys/:id`
 
-管理员吊销 API Key。
+管理员吊销 API Key。A2A RPC 使用的 API Key 也通过此接口撤销。
+
+## A2A 1.0（机器接口）
+
+A2A Agent Card 可匿名读取；JSON-RPC 只接受租户 API Key，不接受网页登录 JWT。调用方必须为每个 RPC 请求发送：
+
+```http
+Authorization: Bearer <AgentMa API Key>
+A2A-Version: 1.0
+Content-Type: application/json
+```
+
+所有任务查询都在服务端按 `tenantId + templateId + API Key 调用者` 隔离。不存在和无权访问的任务返回相同的 task-not-found 错误。
+
+### `GET /a2a/agents/:templateId/.well-known/agent-card.json`
+
+返回已显式启用 `a2aPublished` 的模板 Card。Card 只包含公开名称、描述、能力和安全方案，不包含 system prompt、模型、工具路径、租户 ID、远程 Agent 配置或凭据。未发布、已归档、已删除、缺失或跨租户同 ID 冲突的模板返回 `404`。
+
+生产部署应设置 `AGENTMA_PUBLIC_URL=https://example.com`，确保 Card 中的 RPC URL 是外部客户端可访问的绝对地址。
+
+### `POST /a2a/agents/:templateId/rpc`
+
+使用 A2A 1.0 JSON-RPC binding。支持：
+
+- `SendMessage` 与流式发送消息
+- `GetTask`
+- `ListTasks`
+- `SubscribeToTask`，重放已持久化事件后继续接收实时事件
+- `CancelTask`
+
+不支持 push notification、extended Agent Card、A2A 0.3、gRPC、HTTP+JSON binding、文件或二进制 Part。
+
+发送消息示例：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "request-1",
+  "method": "SendMessage",
+  "params": {
+    "message": {
+      "messageId": "client-generated-uuid",
+      "role": "ROLE_USER",
+      "parts": [{ "text": "请总结本周进展" }]
+    },
+    "configuration": {
+      "acceptedOutputModes": ["text/plain", "application/json"],
+      "returnImmediately": false
+    }
+  }
+}
+```
+
+相同 API Key 使用相同 `messageId` 重试时返回原任务，不会重复执行。流式事件会先写入 SQLite 再发送，客户端断线后可通过任务订阅重放。
+
+当任务进入 `TASK_STATE_INPUT_REQUIRED` 时，使用返回的 `taskId` 和 `contextId` 继续：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "request-2",
+  "method": "SendMessage",
+  "params": {
+    "message": {
+      "messageId": "new-client-generated-uuid",
+      "taskId": "task-id",
+      "contextId": "context-id",
+      "role": "ROLE_USER",
+      "parts": [{ "data": { "decision": "allow" } }]
+    }
+  }
+}
+```
+
+权限回复使用 `{ "decision": "allow" | "deny" }`；问题回复使用 `{ "answers": { "问题": "回答" } }`。等待时间默认 30 分钟，可用 `AGENTMA_A2A_INPUT_TIMEOUT_MS` 配置为 1 分钟至 24 小时。进程重启会把仍处于 submitted、working 或 input-required 的任务标记为失败；历史任务和事件仍可查询。
+
+### A2A 模板配置
+
+`PUT /api/agents` 中每个模板可包含：
+
+```json
+{
+  "a2aPublished": true,
+  "a2aRemoteAgents": [
+    {
+      "name": "researcher",
+      "agentCardUrl": "https://remote.example/.well-known/agent-card.json",
+      "credentialRef": "tenant-credential-id"
+    }
+  ]
+}
+```
+
+每个模板最多配置 16 个远程 Agent，名称在模板内不区分大小写唯一。生产 Card URL 必须为 HTTPS，且不得在 URL 中嵌入用户名或密码。`AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1` 只为本地开发允许 loopback HTTP；Card 和选出的 RPC URL 仍会经过 DNS、地址固定、重定向、字节和超时限制。
+
+### A2A 远程凭据
+
+以下接口需要网页登录且租户管理员权限；API Key 不能管理凭据：
+
+- `GET /api/a2a/credentials`：列出元数据，不返回密文或明文。
+- `GET /api/a2a/credential-options`：列出编辑器可选的引用元数据。
+- `POST /api/a2a/credentials`：创建，正文为 `{ "name": "Remote", "secret": "Bearer token value" }`。
+- `PUT /api/a2a/credentials/:id`：轮换，正文为 `{ "secret": "new value" }`，引用 ID 不变。
+- `DELETE /api/a2a/credentials/:id`：删除；仍被模板引用时返回 `409`。
+
+凭据使用 AES-256-GCM 加密。`AGENTMA_A2A_CREDENTIAL_KEY` 必须是 base64 编码的 32 字节密钥；未设置时会在数据目录创建权限为 `0600` 的 `a2a-credential-key`。数据库备份必须同时安全备份该密钥，但应与数据库分开保存；密钥丢失后已有凭据不可恢复。明文或密文不会进入 Card、模板响应、任务、消息、事件、Artifact、审计或远程工具结果。
 
 ## 7. 配额
 

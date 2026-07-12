@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "server": "tsx server.ts",
+    "smoke:a2a": "node scripts/smoke-a2a.mjs",
     "smoke:a2a-sdk": "node scripts/smoke-a2a-sdk.mjs",
     "smoke:a2a-store": "tsx scripts/smoke-a2a-store.mjs",
     "smoke:a2a-credentials": "tsx scripts/smoke-a2a-credentials.mjs",

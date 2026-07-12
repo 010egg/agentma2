@@ -216,7 +216,24 @@ try {
     TaskState.TASK_STATE_SUBMITTED,
     TaskState.TASK_STATE_WORKING,
   ].includes(pending.status?.state));
-  const canceled = await client.cancelTask({ tenant: '', id: pending.id, metadata: undefined }, requestOptions);
+
+  const pendingScope = { tenantId, templateId, callerSub: `api_key:${apiKey.id}` };
+  for (let index = 0; index < 40; index += 1) {
+    const disconnected = executionManager.stream(pendingScope, pending.id);
+    assert.equal((await disconnected.next()).done, false);
+    await disconnected.return();
+  }
+
+  const cancelRace = await Promise.allSettled([
+    client.cancelTask({ tenant: '', id: pending.id, metadata: undefined }, requestOptions),
+    client.cancelTask({ tenant: '', id: pending.id, metadata: undefined }, requestOptions),
+  ]);
+  const cancelSuccesses = cancelRace.filter(result => result.status === 'fulfilled');
+  const cancelFailures = cancelRace.filter(result => result.status === 'rejected');
+  assert.equal(cancelSuccesses.length, 1);
+  assert.equal(cancelFailures.length, 1);
+  assert(cancelFailures[0].reason instanceof TaskNotCancelableError);
+  const canceled = cancelSuccesses[0].value;
   assert.equal(canceled.status?.state, TaskState.TASK_STATE_CANCELED);
   const canceledReplay = [];
   for await (const event of client.resubscribeTask({ tenant: '', id: pending.id }, requestOptions)) {
@@ -250,7 +267,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     checks: [
-      'blocking-send', 'idempotency', 'streaming', 'replay', 'get-list', 'cancel',
+      'blocking-send', 'idempotency', 'streaming', 'replay', 'disconnect-cleanup', 'get-list', 'cancel-race',
       'failure', 'text-message', 'structured-artifact', 'run-options', 'quota-once',
     ],
   }));

@@ -61,8 +61,12 @@ async function resolveRpcUrl(tenantId: string, cardUrl: string) {
   return rpc.url;
 }
 
-function resultText(value: unknown) {
-  const json = JSON.stringify(value);
+function redactCredential(value: string, credential: string | null) {
+  return credential ? value.split(credential).join('[REDACTED]') : value;
+}
+
+function resultText(value: unknown, credential: string | null) {
+  const json = redactCredential(JSON.stringify(value), credential);
   return json.length > RPC_MAX_BYTES ? `${json.slice(0, RPC_MAX_BYTES)}…` : json;
 }
 
@@ -80,7 +84,10 @@ async function rpcCall(rpcUrl: string, credential: string | null, method: string
   });
   if (response.status !== 200) throw new Error('Remote A2A request failed.');
   const payload = JSON.parse(response.body.toString('utf8'));
-  if (payload?.error) throw new Error(`Remote A2A error: ${String(payload.error.message || 'request failed').slice(0, 500)}`);
+  if (payload?.error) {
+    const message = redactCredential(String(payload.error.message || 'request failed'), credential).slice(0, 500);
+    throw new Error(`Remote A2A error: ${message}`);
+  }
   return payload?.result;
 }
 
@@ -153,7 +160,7 @@ export async function callA2ARemote(
       task = result?.task;
       remoteTaskId = task?.id || remoteTaskId;
     }
-    return resultText(result);
+    return resultText(result, credential);
   } finally {
     signal?.removeEventListener('abort', cancel);
   }

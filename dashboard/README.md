@@ -45,6 +45,30 @@ npm run dev
 - `AGENTMA_SANDBOX_NETWORK_MANAGED_ONLY`：默认关闭；设为 `1` 后只允许 managed domains 网络策略，需先验证 WebFetch/远程 MCP/npx。
 - `AGENTMA_RUN_ENV_ALLOWLIST`：逗号分隔追加传入 agent run 的环境变量名。默认仅传 `PATH,LANG,LC_ALL,LC_CTYPE,TZ,TERM,TMPDIR,SHELL`，再注入本次 provider 的 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`。
 
+## A2A 1.0 互操作
+
+Agent 模板可在编辑器中显式开启 A2A 发布。每个已发布模板提供公开 Agent Card 和需要 API Key 的 JSON-RPC 入口：
+
+- Agent Card：`GET /a2a/agents/:templateId/.well-known/agent-card.json`
+- JSON-RPC：`POST /a2a/agents/:templateId/rpc`
+
+RPC 请求必须同时发送 `Authorization: Bearer <AgentMa API Key>`、`A2A-Version: 1.0` 和 `Content-Type: application/json`。网页登录 JWT 不可用于该入口。支持发送/流式发送消息、任务查询与列表、任务事件重连和取消；权限或问题交互会进入 `TASK_STATE_INPUT_REQUIRED`，通过同一 `taskId` 与 `contextId` 再次发送消息后恢复。
+
+模板也可配置最多 16 个远程 A2A Agent。运行时它们会作为受限 MCP 工具注入，远程 Card/RPC 只支持 A2A 1.0 JSON-RPC，并统一经过下述出站 URL 防护。
+
+部署相关环境变量：
+
+- `AGENTMA_PUBLIC_URL`：对外可访问的站点根 URL，用于生成 Card 中的绝对 RPC URL。
+- `AGENTMA_A2A_INPUT_TIMEOUT_MS`：input-required 等待时间，默认 30 分钟，限制为 1 分钟至 24 小时。
+- `AGENTMA_A2A_ALLOW_LOOPBACK_HTTP=1`：仅允许开发环境访问 loopback HTTP Card/RPC；不会放宽任何非 loopback 地址。
+- `AGENTMA_A2A_CREDENTIAL_KEY`：可选的 base64 32 字节远程凭据主密钥；未设置时使用本机密钥文件。
+
+完整接口、配置示例和限制见 [`docs/api.md#a2a-10机器接口`](./docs/api.md)。完整 A2A 回归套件：
+
+```bash
+npm run smoke:a2a
+```
+
 ## A2A 出站 URL 安全
 
 远程 Agent Card 和 RPC 请求必须通过独立的出站 URL 防护客户端。生产请求仅允许 HTTPS，并会校验全部 A/AAAA 解析结果、固定已校验的连接地址、保留原始 TLS SNI/Host、逐跳重新验证重定向，同时限制重定向次数、响应大小和连接、响应、总时长。

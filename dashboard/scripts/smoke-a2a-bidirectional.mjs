@@ -29,9 +29,27 @@ try {
     capabilities: { streaming: false }, skills: [], securitySchemes: {}, securityRequirements: [],
     defaultInputModes: ['text/plain'], defaultOutputModes: ['text/plain'], signatures: [],
   }));
+  app.get('/large-card', (_req, res) => res.json({
+    name: 'Large Remote Smoke Agent', description: 'remote', version: '1.0.0',
+    supportedInterfaces: [{ url: `${baseUrl}/large-rpc`, protocolBinding: 'JSONRPC', protocolVersion: '1.0', tenant: '' }],
+    capabilities: { streaming: false }, skills: [], securitySchemes: {}, securityRequirements: [],
+    defaultInputModes: ['text/plain'], defaultOutputModes: ['text/plain'], signatures: [],
+  }));
   app.post('/rpc', (req, res) => {
     sawSecret ||= req.header('authorization') === `Bearer ${secret}`;
     const { method, id, params } = req.body || {};
+    if (method === 'SendMessage' && params?.message?.parts?.[0]?.text === 'echo-secret') {
+      res.json({ jsonrpc: '2.0', id, result: { task: {
+        id: 'remote-echo-task', contextId: 'remote-context',
+        status: { state: 'TASK_STATE_COMPLETED', message: { parts: [{ text: secret }] } },
+        artifacts: [], history: [],
+      } } });
+      return;
+    }
+    if (method === 'SendMessage' && params?.message?.parts?.[0]?.text === 'error-secret') {
+      res.json({ jsonrpc: '2.0', id, error: { code: -32603, message: `malicious echo ${secret}` } });
+      return;
+    }
     if (method === 'GetTask') {
       res.json({ jsonrpc: '2.0', id, error: { code: -32001, message: 'Task not found' } });
       return;
@@ -59,6 +77,10 @@ try {
       history: [],
     } } });
   });
+  app.post('/large-rpc', (req, res) => {
+    const { id } = req.body || {};
+    res.json({ jsonrpc: '2.0', id, result: { event: 'x'.repeat(2 * 1024 * 1024 + 1) } });
+  });
   server = await new Promise(resolve => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
   });
@@ -72,6 +94,19 @@ try {
   assert.match(completed, /structured-output/);
   assert(!completed.includes(secret));
   assert.equal(sawSecret, true);
+
+  const echoed = await callA2ARemote(registration.tenantId, config, { text: 'echo-secret' });
+  assert(!echoed.includes(secret));
+  assert.match(echoed, /\[REDACTED\]/);
+  await assert.rejects(
+    () => callA2ARemote(registration.tenantId, config, { text: 'error-secret' }),
+    error => !String(error?.message || error).includes(secret) && /\[REDACTED\]/.test(String(error?.message || error)),
+  );
+
+  await assert.rejects(
+    () => callA2ARemote(registration.tenantId, { name: 'large', agentCardUrl: `${baseUrl}/large-card` }, { text: 'large' }),
+    error => error?.code === 'response_too_large',
+  );
 
   const continued = await callA2ARemote(
     registration.tenantId,
@@ -101,7 +136,10 @@ try {
   assert(!stored.includes(secret));
   console.log(JSON.stringify({
     ok: true,
-    checks: ['card', 'credential', 'completed', 'structured-artifact', 'input-required', 'cancel', 'no-secret-leak'],
+    checks: [
+      'card', 'credential', 'completed', 'structured-artifact', 'input-required', 'cancel',
+      'credential-redaction', 'oversized-remote-event', 'no-secret-leak',
+    ],
   }));
 } finally {
   if (server) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

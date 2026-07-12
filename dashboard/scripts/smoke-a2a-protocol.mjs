@@ -227,6 +227,21 @@ try {
   assert.equal(malformed.response.status, 400);
   assert.equal(malformed.body.error?.code, -32700);
 
+  const oversizedMessage = await rpc(baseUrl, agent.id, apiKey.rawKey, {
+    jsonrpc: '2.0',
+    id: 'oversized-message',
+    method: 'SendMessage',
+    params: {
+      message: {
+        messageId: crypto.randomUUID(),
+        role: 'ROLE_USER',
+        parts: [{ text: 'x'.repeat(1024 * 1024 + 1) }],
+      },
+      configuration: { acceptedOutputModes: ['text/plain'], returnImmediately: false },
+    },
+  });
+  assert.equal(oversizedMessage.response.status, 413);
+
   const unknownMethod = await rpc(baseUrl, agent.id, apiKey.rawKey, {
     jsonrpc: '2.0', id: 'unknown', method: 'UnknownMethod', params: {},
   });
@@ -361,7 +376,7 @@ try {
     ok: true,
     checks: [
       'public-card', 'card-redaction', 'etag', 'api-key-only', 'version', 'content-type',
-      'json-rpc-errors', 'official-client', 'persisted-get-list-cancel', 'caller-isolation',
+      'json-rpc-errors', 'oversized-message', 'official-client', 'persisted-get-list-cancel', 'caller-isolation',
       'tenant-isolation', 'ambiguous-card',
     ],
   }));
