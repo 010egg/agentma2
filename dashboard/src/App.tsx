@@ -20,6 +20,7 @@ import Subagents from './pages/Subagents';
 import Permissions from './pages/Permissions';
 import Observability from './pages/Observability';
 import CrawlerOps from './pages/CrawlerOps';
+import Evaluations from './pages/Evaluations';
 import Settings from './pages/Settings';
 import Account from './pages/Account';
 
@@ -48,6 +49,7 @@ export default function App() {
                 <Route path="/subagents" element={<Subagents />} />
                 <Route path="/permissions" element={<Permissions />} />
                 <Route path="/observability" element={<Observability />} />
+                <Route path="/evaluations" element={<Evaluations />} />
                 <Route path="/crawler" element={<CrawlerOps />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/account" element={<Account />} />

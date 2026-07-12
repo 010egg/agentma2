@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import bcrypt from 'bcryptjs';
 import { getCredentialCipher } from './server-credentials.ts';
 import { initializeA2ATaskStore } from './server-a2a-store.ts';
+import { initializeEvaluationStore } from './server-evaluation-store.ts';
 import {
   agentRunOutcomeIsFailure,
   normalizeChatMessageStatus,
@@ -479,6 +480,7 @@ db.exec('PRAGMA foreign_keys = ON');
 
 initSchema();
 initializeA2ATaskStore(db);
+initializeEvaluationStore(db);
 migrateLegacyJson();
 backfillUserIdentityColumns();
 migrateOwnerSubsToUserIds();

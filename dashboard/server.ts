@@ -119,6 +119,7 @@ import {
 import { listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, outcomeToMessageStatus, type RunOutcome } from './src/simulator/run-state.ts';
 import { mountA2ARoutes } from './server-a2a.ts';
+import { mountEvaluationRoutes } from './server-evaluations.ts';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -2574,6 +2575,8 @@ function requireAdmin(req: any, res: any, next: any) {
   if (req.auth.role !== 'tenant_admin') { res.status(403).json({ error: '需要管理员权限' }); return; }
   next();
 }
+
+mountEvaluationRoutes(app, { authMiddleware, requireAdmin });
 
 function getChatOwnerSub(auth: { sub: string }) {
   return auth.sub;

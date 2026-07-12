@@ -19,6 +19,7 @@ const PAGE_META = [
   { match: (path: string) => path === '/subagents', title: '子代理管理', eyebrow: 'subagents', lede: '维护 AgentDefinition 和运行配置。' },
   { match: (path: string) => path === '/permissions', title: '权限系统', eyebrow: 'permissions', lede: '配置 canUseTool 规则、模式和决策检查。' },
   { match: (path: string) => path === '/observability', title: '可观测性', eyebrow: 'observability', lede: '查看事件结构、运行记录和环境变量。' },
+  { match: (path: string) => path === '/evaluations', title: '评估系统', eyebrow: 'evaluation ops', lede: '统一运行代码修复与问答评测，完成评分、终审和报告。' },
 ];
 
 function getPageMeta(pathname: string) {

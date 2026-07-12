@@ -29,10 +29,11 @@ const SECTIONS = [
       { path: '/subagents', label: '子代理管理', icon: 'agents' },
       { path: '/permissions', label: '权限系统', icon: 'shield' },
       { path: '/observability', label: '可观测性', icon: 'chart' },
+      { path: '/evaluations', label: '评估系统', icon: 'layers', reviewerVisible: true },
       { path: '/crawler', label: '操作后台', icon: 'tools' },
     ],
   },
-] satisfies Array<{ title: string; adminOnly?: boolean; items: Array<{ path: string; label: string; icon: LineIconName }> }>;
+] satisfies Array<{ title: string; adminOnly?: boolean; items: Array<{ path: string; label: string; icon: LineIconName; reviewerVisible?: boolean }> }>;
 
 type SidebarProps = {
   collapsed?: boolean;
@@ -69,10 +70,10 @@ export default function Sidebar({ collapsed = false, onNavigate, onToggleCollaps
         </button>
       </div>
       <div className="sidebar-scroll">
-        {SECTIONS.filter(section => !section.adminOnly || isAdmin).map(section => (
+        {SECTIONS.filter(section => !section.adminOnly || isAdmin || section.items.some(item => 'reviewerVisible' in item && item.reviewerVisible)).map(section => (
           <div className="sidebar-section" key={section.title}>
             <div className="sidebar-section-title">{section.title}</div>
-            {section.items.map(item => (
+            {section.items.filter(item => !section.adminOnly || isAdmin || ('reviewerVisible' in item && item.reviewerVisible)).map(item => (
               <NavLink
                 key={item.path}
                 to={item.path}

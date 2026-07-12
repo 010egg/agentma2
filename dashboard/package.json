@@ -32,6 +32,8 @@
     "smoke:user-plan-quotas": "node scripts/smoke-user-plan-quotas.mjs",
     "smoke:permission-rules": "node scripts/smoke-permission-rules.mjs",
     "smoke:memory-stats": "tsx scripts/smoke-memory-stats.mjs",
+    "smoke:evaluations": "tsx scripts/smoke-evaluations.mjs",
+    "smoke:evaluations-api": "node scripts/smoke-evaluations-api.mjs",
     "smoke:douyin-resolve": "tsx scripts/smoke-douyin-resolve.mjs",
     "smoke:transcribe": "tsx scripts/smoke-transcribe.mjs",
     "smoke:skills-public": "node scripts/smoke-skills-public.mjs",

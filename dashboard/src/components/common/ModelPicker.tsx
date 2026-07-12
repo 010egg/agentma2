@@ -5,10 +5,11 @@ type ModelPickerProps = {
   models: string[];
   onChange: (value: string) => void;
   allowEmpty?: boolean;
+  emptyLabel?: string;
   placeholder?: string;
 };
 
-export default function ModelPicker({ value, models, onChange, allowEmpty = false, placeholder = '选择模型' }: ModelPickerProps) {
+export default function ModelPicker({ value, models, onChange, allowEmpty = false, emptyLabel = '继承主模型', placeholder = '选择模型' }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
@@ -91,7 +92,7 @@ export default function ModelPicker({ value, models, onChange, allowEmpty = fals
               onClick={() => choose('')}
               style={{ width: '100%', justifyContent: 'flex-start', border: 0, borderRadius: 0 }}
             >
-              继承主模型
+              {emptyLabel}
             </button>
           )}
           {filteredModels.map(model => (
