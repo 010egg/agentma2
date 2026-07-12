@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import LineIcon from '../components/LineIcon';
 import ModelPicker from '../components/common/ModelPicker';
@@ -242,6 +242,7 @@ export default function Evaluations() {
   const [selectedRunId, setSelectedRunId] = useState('');
   const [report, setReport] = useState<Report | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const reportRequestRunIdRef = useRef('');
   const [selectedAttempt, setSelectedAttempt] = useState<ReviewAttempt | null>(null);
   const [selectedGroupKey, setSelectedGroupKey] = useState('');
   const [evidenceSaveState, setEvidenceSaveState] = useState<Record<string, EvidenceSaveEntry>>({});
@@ -297,16 +298,22 @@ export default function Evaluations() {
   }, [isAdmin]);
 
   const loadReport = useCallback(async (runId: string, quiet = false) => {
+    reportRequestRunIdRef.current = runId;
     setSelectedRunId(runId);
-    if (!quiet) setReportLoading(true);
+    if (!quiet) {
+      setReport(null);
+      setReportLoading(true);
+    }
     try {
       const data = await api<Report>(`/api/evaluations/runs/${encodeURIComponent(runId)}/report`);
+      if (reportRequestRunIdRef.current !== runId) return;
       setReport(data);
       setError('');
     } catch (loadError) {
+      if (reportRequestRunIdRef.current !== runId) return;
       setError((loadError as Error).message);
     } finally {
-      if (!quiet) setReportLoading(false);
+      if (!quiet && reportRequestRunIdRef.current === runId) setReportLoading(false);
     }
   }, []);
 
@@ -326,16 +333,49 @@ export default function Evaluations() {
     return () => window.clearInterval(timer);
   }, [overview.runs, selectedRunId, loadOverview, loadReport]);
 
-  const activeRun = overview.runs.find(run => run.id === selectedRunId) || report?.run || null;
+  const selectedRunReport = selectedRunId && report?.run.id === selectedRunId ? report : null;
+  const activeRun = selectedRunId
+    ? overview.runs.find(run => run.id === selectedRunId) || selectedRunReport?.run || null
+    : null;
   const pendingReviews = overview.metrics.pendingReviewRuns;
   const selectedProject = overview.projects.find(project => project.id === projectScope) || null;
+  const selectedRunMetrics = useMemo(() => {
+    if (!selectedRunReport) return null;
+    const progress = selectedRunReport.run.progress;
+    const totalJobs = progress?.total || 0;
+    const terminalJobs = (progress?.completed || 0) + (progress?.failed || 0) + (progress?.cancelled || 0);
+    const progressPercent = totalJobs ? Math.round((terminalJobs / totalJobs) * 100) : 0;
+    const pendingEvidenceReviews = selectedRunReport.reviewMatrix.groups.filter(group => (
+      !group.humanReviewed || group.decision === 'needs_attention'
+    )).length;
+    const totals = selectedRunReport.rankings.reduce((result, ranking) => ({
+      tokens: result.tokens + ranking.totalTokens,
+      costUsd: result.costUsd + ranking.totalCostUsd,
+    }), { tokens: 0, costUsd: 0 });
+
+    return {
+      candidateCount: selectedRunReport.run.candidates?.length ?? selectedRunReport.rankings.length,
+      caseGroupCount: selectedRunReport.reviewMatrix.summary.total,
+      terminalJobs,
+      totalJobs,
+      progressPercent,
+      passRate: selectedRunReport.reviewMatrix.summary.passRate,
+      pendingEvidenceReviews,
+      totalTokens: totals.tokens,
+      totalCostUsd: totals.costUsd,
+    };
+  }, [selectedRunReport]);
+  const kpiScopeLabel = selectedRunReport ? '当前运行' : selectedProject ? '当前项目' : '全部项目';
+  const kpiScopeName = selectedRunReport?.run.name || selectedProject?.name || '全部项目';
   const selectedReviewGroup = report?.reviewMatrix.groups.find(group => `${group.candidateId}:${group.caseId}` === selectedGroupKey) || null;
   const selectedGroupSaveKey = selectedReviewGroup ? `case:${selectedReviewGroup.candidateId}:${selectedReviewGroup.caseId}` : '';
   const selectedAttemptSaveKey = selectedAttempt ? `attempt:${selectedAttempt.id}` : '';
   const changeProjectScope = (value: string) => {
+    reportRequestRunIdRef.current = '';
     setProjectScope(value);
     setSelectedRunId('');
     setReport(null);
+    setReportLoading(false);
     setSelectedGroupKey('');
     setSelectedAttempt(null);
   };
@@ -523,16 +563,27 @@ export default function Evaluations() {
 
       {(error || notice) && <div className={`evaluation-alert ${error ? 'error' : 'success'}`}><span>{error || notice}</span><button type="button" onClick={() => { setError(''); setNotice(''); }} aria-label="关闭"><LineIcon name="x" /></button></div>}
 
-      <section className="evaluation-kpis" aria-label="评测概览">
-        <div><span>运行总数</span><strong>{formatNumber(overview.metrics.totalRuns)}</strong></div>
-        <div><span>进行中</span><strong>{formatNumber(overview.metrics.runningRuns)}</strong></div>
-        {selectedProject
-          ? <div><span>样本通过率</span><strong>{overview.metrics.passRate == null ? '-' : `${formatNumber(overview.metrics.passRate * 100, 1)}%`}</strong></div>
-          : <div><span>待审核</span><strong>{formatNumber(overview.metrics.pendingReviewRuns)}</strong></div>}
-        {selectedProject
-          ? <div><span>待审核样本</span><strong>{formatNumber(overview.metrics.pendingEvidenceReviews)}</strong></div>
-          : <div><span>已完成</span><strong>{formatNumber(overview.metrics.completedRuns)}</strong></div>}
-        <div><span>Token / 成本</span><strong>{formatNumber(overview.metrics.totalTokens)} / ${overview.metrics.totalCostUsd.toFixed(2)}</strong></div>
+      <section className="evaluation-kpi-panel" aria-label={`${kpiScopeLabel}评测概览`}>
+        <div className="evaluation-kpi-scope"><span>{kpiScopeLabel}</span><strong title={kpiScopeName}>{kpiScopeName}</strong></div>
+        <div className="evaluation-kpis">
+          {selectedRunMetrics ? <>
+            <div><span>候选 / 用例</span><strong>{formatNumber(selectedRunMetrics.candidateCount)} / {formatNumber(selectedRunMetrics.caseGroupCount)}</strong></div>
+            <div><span>执行进度</span><strong>{formatNumber(selectedRunMetrics.terminalJobs)} / {formatNumber(selectedRunMetrics.totalJobs)} · {selectedRunMetrics.progressPercent}%</strong></div>
+            <div><span>样本通过率</span><strong>{selectedRunMetrics.passRate == null ? '-' : `${formatNumber(selectedRunMetrics.passRate * 100, 1)}%`}</strong></div>
+            <div><span>待审核样本</span><strong>{formatNumber(selectedRunMetrics.pendingEvidenceReviews)}</strong></div>
+            <div><span>Token / 成本</span><strong>{formatNumber(selectedRunMetrics.totalTokens)} / ${selectedRunMetrics.totalCostUsd.toFixed(2)}</strong></div>
+          </> : <>
+            <div><span>运行总数</span><strong>{formatNumber(overview.metrics.totalRuns)}</strong></div>
+            <div><span>进行中</span><strong>{formatNumber(overview.metrics.runningRuns)}</strong></div>
+            {selectedProject
+              ? <div><span>样本通过率</span><strong>{overview.metrics.passRate == null ? '-' : `${formatNumber(overview.metrics.passRate * 100, 1)}%`}</strong></div>
+              : <div><span>待审核</span><strong>{formatNumber(overview.metrics.pendingReviewRuns)}</strong></div>}
+            {selectedProject
+              ? <div><span>待审核样本</span><strong>{formatNumber(overview.metrics.pendingEvidenceReviews)}</strong></div>
+              : <div><span>已完成</span><strong>{formatNumber(overview.metrics.completedRuns)}</strong></div>}
+            <div><span>Token / 成本</span><strong>{formatNumber(overview.metrics.totalTokens)} / ${overview.metrics.totalCostUsd.toFixed(2)}</strong></div>
+          </>}
+        </div>
       </section>
 
       {tab === 'runs' && (
@@ -577,7 +628,7 @@ export default function Evaluations() {
                 <>
                   <div className="evaluation-detail-head">
                     <div><span className="evaluation-detail-kicker">{typeLabel(activeRun.type)}</span><h2>{activeRun.name}</h2></div>
-                    <button className="icon-btn" type="button" onClick={() => { setSelectedRunId(''); setReport(null); }} aria-label="关闭详情"><LineIcon name="x" /></button>
+                    <button className="icon-btn" type="button" onClick={() => { reportRequestRunIdRef.current = ''; setSelectedRunId(''); setReport(null); setReportLoading(false); }} aria-label="关闭详情"><LineIcon name="x" /></button>
                   </div>
                   {reportLoading && <div className="evaluation-loading">加载报告...</div>}
                   {report && (
