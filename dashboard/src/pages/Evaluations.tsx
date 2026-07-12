@@ -143,6 +143,13 @@ function formatDuration(value: number | null | undefined) {
   return `${hours.toFixed(hours < 10 ? 1 : 0)} 小时`;
 }
 
+function KpiLoading({ compact = false }: { compact?: boolean }) {
+  return <i role="status" aria-label="加载中" style={{
+    display: 'inline-block', width: compact ? 30 : 68, height: 17, borderRadius: 3,
+    background: 'color-mix(in srgb, var(--ink-muted) 20%, transparent)', verticalAlign: -1,
+  }} />;
+}
+
 function parseApiError(data: unknown, status: number) {
   const record = data && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, unknown> : {};
   return (typeof record.message === 'string' && record.message)
@@ -340,33 +347,33 @@ export default function Evaluations() {
   const pendingReviews = overview.metrics.pendingReviewRuns;
   const selectedProject = overview.projects.find(project => project.id === projectScope) || null;
   const selectedRunMetrics = useMemo(() => {
-    if (!selectedRunReport) return null;
-    const progress = selectedRunReport.run.progress;
+    if (!selectedRunId) return null;
+    const progress = selectedRunReport?.run.progress || activeRun?.progress;
     const totalJobs = progress?.total || 0;
     const terminalJobs = (progress?.completed || 0) + (progress?.failed || 0) + (progress?.cancelled || 0);
     const progressPercent = totalJobs ? Math.round((terminalJobs / totalJobs) * 100) : 0;
-    const pendingEvidenceReviews = selectedRunReport.reviewMatrix.groups.filter(group => (
+    const pendingEvidenceReviews = selectedRunReport?.reviewMatrix.groups.filter(group => (
       !group.humanReviewed || group.decision === 'needs_attention'
-    )).length;
-    const totals = selectedRunReport.rankings.reduce((result, ranking) => ({
+    )).length ?? null;
+    const totals = selectedRunReport?.rankings.reduce((result, ranking) => ({
       tokens: result.tokens + ranking.totalTokens,
       costUsd: result.costUsd + ranking.totalCostUsd,
-    }), { tokens: 0, costUsd: 0 });
+    }), { tokens: 0, costUsd: 0 }) || null;
 
     return {
-      candidateCount: selectedRunReport.run.candidates?.length ?? selectedRunReport.rankings.length,
-      caseGroupCount: selectedRunReport.reviewMatrix.summary.total,
+      candidateCount: selectedRunReport?.run.candidates?.length ?? activeRun?.candidates?.length ?? null,
+      caseGroupCount: selectedRunReport?.reviewMatrix.summary.total ?? null,
       terminalJobs,
       totalJobs,
       progressPercent,
-      passRate: selectedRunReport.reviewMatrix.summary.passRate,
+      passRate: selectedRunReport?.reviewMatrix.summary.passRate,
       pendingEvidenceReviews,
-      totalTokens: totals.tokens,
-      totalCostUsd: totals.costUsd,
+      totalTokens: totals?.tokens ?? null,
+      totalCostUsd: totals?.costUsd ?? null,
     };
-  }, [selectedRunReport]);
-  const kpiScopeLabel = selectedRunReport ? '当前运行' : selectedProject ? '当前项目' : '全部项目';
-  const kpiScopeName = selectedRunReport?.run.name || selectedProject?.name || '全部项目';
+  }, [activeRun, selectedRunId, selectedRunReport]);
+  const kpiScopeLabel = selectedRunId ? '当前运行' : selectedProject ? '当前项目' : '全部项目';
+  const kpiScopeName = activeRun?.name || selectedProject?.name || (selectedRunId ? '加载中' : '全部项目');
   const selectedReviewGroup = report?.reviewMatrix.groups.find(group => `${group.candidateId}:${group.caseId}` === selectedGroupKey) || null;
   const selectedGroupSaveKey = selectedReviewGroup ? `case:${selectedReviewGroup.candidateId}:${selectedReviewGroup.caseId}` : '';
   const selectedAttemptSaveKey = selectedAttempt ? `attempt:${selectedAttempt.id}` : '';
@@ -567,11 +574,11 @@ export default function Evaluations() {
         <div className="evaluation-kpi-scope"><span>{kpiScopeLabel}</span><strong title={kpiScopeName}>{kpiScopeName}</strong></div>
         <div className="evaluation-kpis">
           {selectedRunMetrics ? <>
-            <div><span>候选 / 用例</span><strong>{formatNumber(selectedRunMetrics.candidateCount)} / {formatNumber(selectedRunMetrics.caseGroupCount)}</strong></div>
+            <div><span>候选 / 用例</span><strong>{selectedRunMetrics.candidateCount == null ? (reportLoading ? <KpiLoading compact /> : '-') : formatNumber(selectedRunMetrics.candidateCount)} / {selectedRunMetrics.caseGroupCount == null ? (reportLoading ? <KpiLoading compact /> : '-') : formatNumber(selectedRunMetrics.caseGroupCount)}</strong></div>
             <div><span>执行进度</span><strong>{formatNumber(selectedRunMetrics.terminalJobs)} / {formatNumber(selectedRunMetrics.totalJobs)} · {selectedRunMetrics.progressPercent}%</strong></div>
-            <div><span>样本通过率</span><strong>{selectedRunMetrics.passRate == null ? '-' : `${formatNumber(selectedRunMetrics.passRate * 100, 1)}%`}</strong></div>
-            <div><span>待审核样本</span><strong>{formatNumber(selectedRunMetrics.pendingEvidenceReviews)}</strong></div>
-            <div><span>Token / 成本</span><strong>{formatNumber(selectedRunMetrics.totalTokens)} / ${selectedRunMetrics.totalCostUsd.toFixed(2)}</strong></div>
+            <div><span>样本通过率</span><strong>{selectedRunMetrics.passRate === undefined ? (reportLoading ? <KpiLoading /> : '-') : selectedRunMetrics.passRate == null ? '-' : `${formatNumber(selectedRunMetrics.passRate * 100, 1)}%`}</strong></div>
+            <div><span>待审核样本</span><strong>{selectedRunMetrics.pendingEvidenceReviews == null ? (reportLoading ? <KpiLoading /> : '-') : formatNumber(selectedRunMetrics.pendingEvidenceReviews)}</strong></div>
+            <div><span>Token / 成本</span><strong>{selectedRunMetrics.totalTokens == null || selectedRunMetrics.totalCostUsd == null ? (reportLoading ? <KpiLoading /> : '-') : `${formatNumber(selectedRunMetrics.totalTokens)} / $${selectedRunMetrics.totalCostUsd.toFixed(2)}`}</strong></div>
           </> : <>
             <div><span>运行总数</span><strong>{formatNumber(overview.metrics.totalRuns)}</strong></div>
             <div><span>进行中</span><strong>{formatNumber(overview.metrics.runningRuns)}</strong></div>
