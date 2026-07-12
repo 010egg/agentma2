@@ -2334,6 +2334,9 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     subagents,
     skills,
     mcpServers,
+    a2aRemoteAgents: Array.isArray(template?.a2aRemoteAgents)
+      ? template.a2aRemoteAgents as NonNullable<Parameters<typeof runAgent>[0]['a2aRemoteAgents']>
+      : undefined,
     cwd: sdkCwd || undefined,
     seedDir: resolveAgentSeedDirForTemplate(req.auth.tenantId, template),
     resumeSdkSessionId: resumeSdkSessionId || undefined,
@@ -5134,6 +5137,9 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
       subagents,
       skills,
       mcpServers,
+      a2aRemoteAgents: Array.isArray(storedTemplate?.a2aRemoteAgents)
+        ? storedTemplate.a2aRemoteAgents as NonNullable<Parameters<typeof runAgent>[0]['a2aRemoteAgents']>
+        : undefined,
       outputFormat: tmpl?.outputSchema ? { type: 'json_schema', schema: tmpl.outputSchema } : undefined,
       enableFileCheckpointing: tmpl?.enableFileCheckpointing === true || undefined,
       useKnowledge: tmpl?.useKnowledge === true || knowledgeSourceIds.length > 0,

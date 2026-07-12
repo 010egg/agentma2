@@ -434,7 +434,7 @@ export type AgentEvent =
   | { type: 'task_updated'; taskId: string; status?: string; description?: string; error?: string; backgrounded?: boolean; sdkSessionId?: string }
   | { type: 'task_notification'; taskId: string; toolUseId?: string; status: string; summary?: string; outputFile?: string; usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }; sdkSessionId?: string }
   | { type: 'context_compaction'; subtype: 'compact_boundary'; message: string; sdkSessionId?: string; timestamp: number }
-  | { type: 'run_log'; level: 'info' | 'warn'; scope: 'skill' | 'tool_search' | 'image' | 'visual' | 'mcp'; message: string }
+  | { type: 'run_log'; level: 'info' | 'warn'; scope: 'skill' | 'tool_search' | 'image' | 'visual' | 'mcp' | 'a2a'; message: string }
   | { type: 'run_outcome'; outcome: RunOutcome; subtype?: string; message?: string }
   | { type: 'result'; subtype: string; text: string; usage: { input_tokens: number; output_tokens: number }; duration_ms: number; cost_usd: number; model: string; sdkSessionId?: string; sdkCwd?: string; structuredOutput?: unknown }
   | { type: 'error'; message: string };
@@ -1217,12 +1217,24 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   }
 
   const customMcp = buildCustomToolsMcp(opts.requestTools || []);
-  const a2aRemoteMcp = opts.a2aRemoteAgents?.length
-    ? (await import('./server-a2a-client.ts')).buildA2ARemoteMcp(opts.tenantId, opts.a2aRemoteAgents, {
+  let a2aRemoteMcp = null;
+  if (opts.a2aRemoteAgents?.length) {
+    const a2aClient = await import('./server-a2a-client.ts');
+    const descriptors = a2aClient.describeA2ARemoteTools(opts.a2aRemoteAgents);
+    a2aRemoteMcp = a2aClient.buildA2ARemoteMcp(opts.tenantId, opts.a2aRemoteAgents, {
       requestUserQuestion: opts.requestUserQuestion,
       signal: opts.abortController?.signal,
-    })
-    : null;
+      onLog: event => opts.emit({ type: 'run_log', scope: 'a2a', ...event }),
+    });
+    if (a2aRemoteMcp) {
+      opts.emit({
+        type: 'run_log',
+        level: 'info',
+        scope: 'a2a',
+        message: `A2A 已加载：${descriptors.map(item => `${item.config.name} (${item.sdkToolName})`).join('，')}`,
+      });
+    }
+  }
   const hooks = buildTenantHooks(opts.tenantId, opts.emit);
   const requestedKnowledgeIds = Array.isArray(opts.knowledgeSourceIds) && opts.knowledgeSourceIds.length
     ? new Set(opts.knowledgeSourceIds)

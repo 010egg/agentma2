@@ -4,14 +4,24 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentma-a2a-bidirectional-'));
 process.env.AGENTMA_DATA_DIR = dataDir;
 process.env.AGENTMA_A2A_ALLOW_LOOPBACK_HTTP = '1';
 let server;
+let mcpClient;
+let mcpServerInstance;
 try {
   const store = await import('../server-store.ts');
-  const { callA2ARemote, discoverA2ARemoteAgent, remoteA2AToolName } = await import('../server-a2a-client.ts');
+  const {
+    buildA2ARemoteMcp,
+    callA2ARemote,
+    describeA2ARemoteTools,
+    discoverA2ARemoteAgent,
+    remoteA2AToolName,
+  } = await import('../server-a2a-client.ts');
   const registration = store.registerUser('Remote Caller', `remote-${Date.now()}@gmail.com`, 'password123');
   assert.equal(registration.ok, true);
   const secret = `remote-secret-${crypto.randomUUID()}`;
@@ -94,6 +104,9 @@ try {
   const chineseToolName = remoteA2AToolName('中文研究员', config.agentCardUrl, 0);
   assert.match(chineseToolName, /^remote_agent_[a-f0-9]{8}$/);
   assert.notEqual(chineseToolName, remoteA2AToolName('中文审核员', config.agentCardUrl, 0));
+  const descriptors = describeA2ARemoteTools([{ ...config, name: '中文研究员' }]);
+  assert.equal(descriptors[0].toolName, chineseToolName);
+  assert.equal(descriptors[0].sdkToolName, `mcp__a2a__${chineseToolName}`);
 
   const completed = await callA2ARemote(registration.tenantId, config, { text: 'hello' });
   assert.match(completed, /remote-done/);
@@ -138,16 +151,48 @@ try {
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(cancelCount, 1);
 
+  const a2aLogs = [];
+  const mcp = buildA2ARemoteMcp(registration.tenantId, [{ ...config, name: '中文研究员' }], {
+    onLog: event => a2aLogs.push(event),
+  });
+  assert(mcp);
+  mcpServerInstance = mcp.instance;
+  mcpClient = new Client({ name: 'a2a-smoke-client', version: '1.0.0' }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([mcpClient.connect(clientTransport), mcpServerInstance.connect(serverTransport)]);
+  const listedTools = await mcpClient.listTools();
+  assert.equal(listedTools.tools[0].name, chineseToolName);
+  const mcpCompleted = await mcpClient.callTool({ name: chineseToolName, arguments: { text: 'hello' } });
+  assert.equal(mcpCompleted.isError, undefined);
+  const mcpFailed = await mcpClient.callTool({ name: chineseToolName, arguments: { text: 'error-secret' } });
+  assert.equal(mcpFailed.isError, true);
+  assert(a2aLogs.some(event => event.message.startsWith('A2A 调用开始：中文研究员')));
+  assert(a2aLogs.some(event => event.message.startsWith('A2A 调用完成：中文研究员')));
+  assert(a2aLogs.some(event => event.message.startsWith('A2A 调用失败：中文研究员')));
+  assert(!JSON.stringify(a2aLogs).includes(secret));
+
+  const serverSource = fs.readFileSync(path.resolve(import.meta.dirname, '../server.ts'), 'utf8');
+  const chatRoute = serverSource.slice(
+    serverSource.indexOf("app.post('/api/chat'"),
+    serverSource.indexOf("app.post('/api/chat/next-suggestion'"),
+  );
+  const agentRunRoute = serverSource.slice(serverSource.indexOf("app.post('/api/agents/run'"));
+  assert.match(chatRoute, /a2aRemoteAgents:\s*Array\.isArray\(template\?\.a2aRemoteAgents\)/);
+  assert.match(agentRunRoute, /a2aRemoteAgents:\s*Array\.isArray\(storedTemplate\?\.a2aRemoteAgents\)/);
+  assert.doesNotMatch(agentRunRoute, /a2aRemoteAgents:\s*Array\.isArray\(tmpl\?\.a2aRemoteAgents\)/);
+
   const stored = JSON.stringify(store.listA2ACredentials(registration.tenantId));
   assert(!stored.includes(secret));
   console.log(JSON.stringify({
     ok: true,
     checks: [
       'card', 'card-discovery', 'chinese-tool-name', 'credential', 'completed', 'structured-artifact', 'input-required', 'cancel',
-      'credential-redaction', 'oversized-remote-event', 'no-secret-leak',
+      'credential-redaction', 'oversized-remote-event', 'no-secret-leak', 'mcp-runtime-logs', 'chat-runtime-wiring',
     ],
   }));
 } finally {
+  if (mcpClient) await mcpClient.close().catch(() => {});
+  if (mcpServerInstance) await mcpServerInstance.close().catch(() => {});
   if (server) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   fs.rmSync(dataDir, { recursive: true, force: true });
 }

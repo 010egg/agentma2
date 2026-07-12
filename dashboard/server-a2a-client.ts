@@ -10,6 +10,13 @@ type QuestionRequester = (request: {
   toolUseID: string;
   signal?: AbortSignal;
 }) => Promise<{ answers: Record<string, string> }>;
+type A2ALogger = (event: { level: 'info' | 'warn'; message: string }) => void;
+
+export type A2ARemoteToolDescriptor = {
+  config: A2ARemoteConfig;
+  toolName: string;
+  sdkToolName: string;
+};
 
 const CARD_TTL_MS = 5 * 60 * 1000;
 const CARD_MAX_BYTES = 256 * 1024;
@@ -49,6 +56,21 @@ export function remoteA2AToolName(
   }
   usedNames.add(candidate);
   return candidate;
+}
+
+export function describeA2ARemoteTools(remotes: A2ARemoteConfig[]): A2ARemoteToolDescriptor[] {
+  const usedToolNames = new Set<string>();
+  return remotes.slice(0, 16).map((config, index) => {
+    const toolName = remoteA2AToolName(config.name, config.agentCardUrl, index, usedToolNames);
+    return { config, toolName, sdkToolName: `mcp__a2a__${toolName}` };
+  });
+}
+
+function safeLogError(error: unknown) {
+  return Array.from((error as Error)?.message || String(error), character => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f ? ' ' : character;
+  }).join('').trim().slice(0, 500) || 'unknown error';
 }
 
 export async function discoverA2ARemoteAgent(tenantId: string, cardUrl: string) {
@@ -207,19 +229,22 @@ export async function callA2ARemote(
 export function buildA2ARemoteMcp(
   tenantId: string,
   remotes: A2ARemoteConfig[],
-  options: { requestUserQuestion?: QuestionRequester; signal?: AbortSignal } = {},
+  options: { requestUserQuestion?: QuestionRequester; signal?: AbortSignal; onLog?: A2ALogger } = {},
 ) {
-  const usedToolNames = new Set<string>();
-  const tools = remotes.slice(0, 16).map((config, index) => tool(
-    remoteA2AToolName(config.name, config.agentCardUrl, index, usedToolNames),
+  const tools = describeA2ARemoteTools(remotes).map(({ config, toolName, sdkToolName }) => tool(
+    toolName,
     `Call remote A2A Agent: ${config.name}`,
     { text: z.string().max(64 * 1024).optional(), data: z.unknown().optional() },
     async (args) => {
+      options.onLog?.({ level: 'info', message: `A2A 调用开始：${config.name} (${sdkToolName})` });
       try {
         const text = await callA2ARemote(tenantId, config, args, options.requestUserQuestion, options.signal);
+        options.onLog?.({ level: 'info', message: `A2A 调用完成：${config.name} (${sdkToolName})` });
         return { content: [{ type: 'text', text }] };
       } catch (error) {
-        return { content: [{ type: 'text', text: `Remote Agent call failed: ${(error as Error).message.slice(0, 800)}` }], isError: true };
+        const message = safeLogError(error);
+        options.onLog?.({ level: 'warn', message: `A2A 调用失败：${config.name} (${sdkToolName}) — ${message}` });
+        return { content: [{ type: 'text', text: `Remote Agent call failed: ${message.slice(0, 800)}` }], isError: true };
       }
     },
   ));
