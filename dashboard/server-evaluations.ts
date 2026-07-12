@@ -361,7 +361,7 @@ export function mountEvaluationRoutes(
     const req = request as AuthenticatedRequest;
     if (!requireRunAccess(req, response)) return;
     try {
-      const review = submitEvaluationCaseReview(req.auth.tenantId, req.params.id, req.auth.sub, {
+      const result = submitEvaluationCaseReview(req.auth.tenantId, req.params.id, req.auth.sub, {
         candidateId: req.body?.candidateId,
         caseId: req.body?.caseId,
         decision: req.body?.decision,
@@ -369,11 +369,19 @@ export function mountEvaluationRoutes(
         isAdmin: admin(req),
       });
       audit(req.auth.tenantId, 'review_evaluation_case', req.auth.sub, 'user', `evaluation_run:${req.params.id}`, {
-        candidateId: review.candidateId,
-        caseId: review.caseId,
-        decision: review.decision,
+        candidateId: result.review.candidateId,
+        caseId: result.review.caseId,
+        decision: result.review.decision,
       });
-      response.status(201).json(review);
+      if (result.autoCompleted) {
+        audit(req.auth.tenantId, 'auto_complete_evaluation_review', req.auth.sub, 'user', `evaluation_run:${req.params.id}`, {
+          decision: result.run.reviewDecision,
+          total: result.reviewMatrix.summary.total,
+          passed: result.reviewMatrix.summary.passed,
+          rejected: result.reviewMatrix.summary.rejected,
+        });
+      }
+      response.status(201).json(result);
     } catch (error) {
       sendError(response, error);
     }
@@ -383,17 +391,25 @@ export function mountEvaluationRoutes(
     const req = request as AuthenticatedRequest;
     if (!requireRunAccess(req, response)) return;
     try {
-      const review = submitEvaluationAttemptReview(req.auth.tenantId, req.params.id, req.auth.sub, {
+      const result = submitEvaluationAttemptReview(req.auth.tenantId, req.params.id, req.auth.sub, {
         attemptId: req.body?.attemptId,
         decision: req.body?.decision,
         comment: req.body?.comment,
         isAdmin: admin(req),
       });
       audit(req.auth.tenantId, 'review_evaluation_attempt', req.auth.sub, 'user', `evaluation_run:${req.params.id}`, {
-        attemptId: review.attemptId,
-        decision: review.decision,
+        attemptId: result.review.attemptId,
+        decision: result.review.decision,
       });
-      response.status(201).json(review);
+      if (result.autoCompleted) {
+        audit(req.auth.tenantId, 'auto_complete_evaluation_review', req.auth.sub, 'user', `evaluation_run:${req.params.id}`, {
+          decision: result.run.reviewDecision,
+          total: result.reviewMatrix.summary.total,
+          passed: result.reviewMatrix.summary.passed,
+          rejected: result.reviewMatrix.summary.rejected,
+        });
+      }
+      response.status(201).json(result);
     } catch (error) {
       sendError(response, error);
     }

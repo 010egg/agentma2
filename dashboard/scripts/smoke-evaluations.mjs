@@ -97,6 +97,8 @@ assert.equal(started.progress.executeTotal, 2);
 for (;;) {
   const job = store.claimEvaluationJob('smoke-worker', 10_000);
   if (!job) break;
+  assert(job.startedAt);
+  assert.equal(job.completedAt, null);
   const context = store.getEvaluationJobContext(job.id);
   assert(context);
   const output = context.candidate.offlineAnswers[context.evaluationCase.externalId];
@@ -107,6 +109,9 @@ for (;;) {
     autoScore: result.score,
     passed: result.passed,
   });
+  const completedJob = store.getEvaluationJobContext(job.id);
+  assert(completedJob);
+  assert(completedJob.job.completedAt >= completedJob.job.startedAt);
 }
 
 const awaitingReview = store.getEvaluationRun('tenant-a', run.id);
@@ -116,6 +121,9 @@ assert.equal(report.rankings.length, 1);
 assert.equal(report.rankings[0].attempts, 2);
 assert.equal(report.rankings[0].averageScore, 100);
 assert.equal(report.rankings[0].passRate, 1);
+assert(report.rankings[0].wallClockDurationMs >= 0);
+assert(report.attempts.every(attempt => attempt.startedAt && attempt.completedAt >= attempt.startedAt));
+assert(report.reviewMatrix.groups.every(group => group.startedAt && group.completedAt >= group.startedAt && group.durationMs >= 0));
 
 const firstAttempt = report.attempts[0];
 store.submitEvaluationAttemptReview('tenant-a', run.id, 'reviewer-a', {
@@ -134,17 +142,56 @@ store.submitEvaluationCaseReview('tenant-a', run.id, 'reviewer-a', {
 const caseOverridden = store.getEvaluationReport('tenant-a', run.id);
 assert.equal(caseOverridden.rankings[0].passRate, 1);
 assert.equal(caseOverridden.reviewMatrix.summary.reviewed, 1);
-
-const reviewed = store.submitEvaluationReview('tenant-a', run.id, 'reviewer-a', {
+const remainingGroup = caseOverridden.reviewMatrix.groups.find(group => group.caseId !== firstAttempt.caseId);
+const autoApproved = store.submitEvaluationCaseReview('tenant-a', run.id, 'reviewer-a', {
+  candidateId: remainingGroup.candidateId,
+  caseId: remainingGroup.caseId,
   decision: 'approve',
-  comment: 'evidence checked',
+  comment: 'all evidence ready',
 });
-assert.equal(reviewed.status, 'completed');
-assert.equal(reviewed.reviewDecision, 'approved');
+assert.equal(autoApproved.autoCompleted, true);
+assert.equal(autoApproved.run.status, 'completed');
+assert.equal(autoApproved.run.reviewDecision, 'approved');
+assert(autoApproved.run.completedAt >= autoApproved.run.startedAt);
+assert.throws(
+  () => store.submitEvaluationReview('tenant-a', run.id, 'reviewer-a', { decision: 'approve' }),
+  error => error?.code === 'invalid_state',
+);
 
 const scopedMetrics = store.getEvaluationOverviewMetrics('tenant-a', { admin: true, projectId: project.id });
 assert.equal(scopedMetrics.candidateCaseTotal, 2);
 assert.equal(scopedMetrics.candidateCasePassed, 2);
+
+store.startEvaluationRun('tenant-a', memoryEnabledRun.id);
+for (;;) {
+  const job = store.claimEvaluationJob('reject-worker', 10_000);
+  if (!job) break;
+  const context = store.getEvaluationJobContext(job.id);
+  const output = context.candidate.offlineAnswers[context.evaluationCase.externalId];
+  const result = engine.evaluateQaAnswer(context.evaluationCase, output, context.run.rubricSnapshot);
+  store.completeEvaluationExecutionJob(job.id, { outputText: output, metrics: result.metrics, autoScore: result.score, passed: result.passed });
+}
+const rejectMatrix = store.getEvaluationReviewMatrix('tenant-a', memoryEnabledRun.id);
+const attentionResult = store.submitEvaluationCaseReview('tenant-a', memoryEnabledRun.id, 'reviewer-a', {
+  candidateId: rejectMatrix.groups[0].candidateId,
+  caseId: rejectMatrix.groups[0].caseId,
+  decision: 'needs_attention',
+});
+assert.equal(attentionResult.autoCompleted, false);
+const partialResult = store.submitEvaluationCaseReview('tenant-a', memoryEnabledRun.id, 'reviewer-a', {
+  candidateId: rejectMatrix.groups[1].candidateId,
+  caseId: rejectMatrix.groups[1].caseId,
+  decision: 'approve',
+});
+assert.equal(partialResult.autoCompleted, false);
+const autoRejected = store.submitEvaluationCaseReview('tenant-a', memoryEnabledRun.id, 'reviewer-a', {
+  candidateId: rejectMatrix.groups[0].candidateId,
+  caseId: rejectMatrix.groups[0].caseId,
+  decision: 'reject',
+});
+assert.equal(autoRejected.autoCompleted, true);
+assert.equal(autoRejected.run.status, 'completed');
+assert.equal(autoRejected.run.reviewDecision, 'rejected');
 
 const parallelRun = store.createEvaluationRun('tenant-a', { sub: 'admin-a', role: 'tenant_admin', quotaUserId: null }, {
   name: 'Parallel candidates',
@@ -223,9 +270,10 @@ console.log(JSON.stringify({
   ok: true,
   checks: [
     'tenant-isolation', 'dataset-version', 'evaluation-memory-default-off', 'evaluation-memory-explicit-on', 'offline-candidate', 'job-claim', 'automatic-scoring',
-    'report-ranking', 'attempt-review-override', 'case-review-override', 'project-scoped-metrics',
+    'report-ranking', 'job-attempt-timeline', 'attempt-review-override', 'case-review-override',
+    'auto-review-approved', 'auto-review-rejected', 'attention-blocks-auto-review', 'project-scoped-metrics',
     'parallel-candidate-claim', 'run-concurrency-limit', 'candidate-snapshot-name',
-    'project-archive-restore-delete', 'active-project-delete-blocked', 'assigned-reviewer', 'final-approval', 'command-suggestions',
+    'project-archive-restore-delete', 'active-project-delete-blocked', 'assigned-reviewer', 'completed-review-locked', 'command-suggestions',
     ...(sandboxStatus.available ? ['sandbox-workspace-write', 'sandbox-outside-write-denied'] : ['sandbox-unavailable-fails-closed']),
   ],
 }));

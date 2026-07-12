@@ -20,7 +20,7 @@ type Progress = { total: number; queued: number; running: number; completed: num
 type Run = {
   id: string; name: string; type: EvaluationType; status: RunStatus; projectId: string; datasetVersionId: string;
   rubricId: string; reviewPolicy: 'single' | 'consensus'; reviewRequiredCount: number; reviewDecision?: 'approved' | 'rejected';
-  useMemory: boolean; concurrency: number; tenantConcurrencyLimit: number; reviewConflict: boolean; errorCode: string; errorMessage: string; createdAt: number; updatedAt: number;
+  useMemory: boolean; concurrency: number; tenantConcurrencyLimit: number; reviewConflict: boolean; errorCode: string; errorMessage: string; createdAt: number; updatedAt: number; startedAt: number | null; completedAt: number | null;
   candidates?: Candidate[]; progress?: Progress;
 };
 type SandboxStatus = { available: boolean; provider: string; reason: string; networkDefault: 'deny' };
@@ -32,13 +32,13 @@ type OverviewMetrics = {
 type Overview = { projects: Project[]; datasets: Dataset[]; rubrics: Rubric[]; runs: Run[]; metrics: OverviewMetrics; sandbox: SandboxStatus; worker?: { running: boolean; activeJobs: number; concurrency: number; allowedConcurrency?: number } };
 type Ranking = {
   candidateId: string; name: string; alias: string; source: string; model: string; attempts: number; completed: number; failed: number;
-  passRate: number; averageScore: number; standardDeviation: number; totalTokens: number; totalCostUsd: number; averageDurationMs: number;
+  passRate: number; averageScore: number; standardDeviation: number; totalTokens: number; totalCostUsd: number; averageDurationMs: number; wallClockDurationMs: number | null;
 };
 type Attempt = {
   id: string; candidateId: string; caseId: string; repetition: number; status: string; outputText: string;
   metrics: Array<{ key?: string; label?: string; score?: number; evidence?: string; applied?: boolean }>;
   autoScore: number | null; judgeScore: number | null; judgeReason: string; judgeConfidence: number | null;
-  finalScore: number | null; passed: boolean | null; errorMessage: string;
+  finalScore: number | null; passed: boolean | null; errorMessage: string; startedAt: number | null; completedAt: number; durationMs: number;
 };
 type EvidenceDecision = 'approve' | 'reject' | 'needs_attention';
 type EvidenceReview = { id: string; reviewerSub: string; decision: EvidenceDecision; comment: string; createdAt: number };
@@ -46,7 +46,7 @@ type ReviewAttempt = Attempt & { automaticDecision: EvidenceDecision; reviewDeci
 type ReviewGroup = {
   candidateId: string; candidateName: string; candidateAlias: string; caseId: string; caseExternalId: string; prompt: string;
   attempts: ReviewAttempt[]; automaticDecision: EvidenceDecision; decision: EvidenceDecision; reviewSource: 'case_review' | 'attempt_review' | 'automatic';
-  reviews: EvidenceReview[]; humanReviewed: boolean;
+  reviews: EvidenceReview[]; humanReviewed: boolean; startedAt: number | null; completedAt: number | null; durationMs: number | null; averageAttemptDurationMs: number;
 };
 type ReviewMatrix = { runId: string; groups: ReviewGroup[]; summary: { total: number; passed: number; rejected: number; needsAttention: number; reviewed: number; passRate: number | null } };
 type Report = {
@@ -61,6 +61,9 @@ type Agent = { id: string; name: string; model?: string; description?: string };
 type Reviewer = { id?: string; email?: string; username?: string; name?: string; role?: string };
 type CandidateForm = { id: string; source: 'online' | 'offline'; alias: string; name: string; agentId: string; model: string; repeatCount: number; offlineAnswersText: string };
 type ManualCase = { id: string; prompt: string; expectedAnswer: string; requiredKeywords: string; forbiddenKeywords: string };
+type EvidenceSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+type EvidenceSaveEntry = { status: EvidenceSaveStatus; message?: string };
+type EvidenceReviewResult = { review: EvidenceReview; run: Run; reviewMatrix: ReviewMatrix; autoCompleted: boolean };
 
 const EMPTY_OVERVIEW: Overview = {
   projects: [], datasets: [], rubrics: [], runs: [],
@@ -79,7 +82,7 @@ function typeLabel(type: EvaluationType) {
 
 function statusLabel(status: RunStatus) {
   return ({
-    draft: '草稿', queued: '排队中', running: '执行中', judging: '裁判中', awaiting_review: '待终审',
+    draft: '草稿', queued: '排队中', running: '执行中', judging: '裁判中', awaiting_review: '待审核',
     paused: '已暂停', completed: '已完成', failed: '失败', cancelled: '已取消', archived: '已归档',
   } as Record<RunStatus, string>)[status];
 }
@@ -104,12 +107,40 @@ function evidenceDecisionClass(decision: EvidenceDecision) {
   return 'weak';
 }
 
+function EvidenceDecisionButtons({ value, disabled, compact = false, onChange }: {
+  value: EvidenceDecision | null;
+  disabled?: boolean;
+  compact?: boolean;
+  onChange: (decision: EvidenceDecision) => void;
+}) {
+  return <div className={`evaluation-decision-buttons${compact ? ' compact' : ''}`}>
+    <button className={value === 'approve' ? 'active approve' : ''} type="button" disabled={disabled} onClick={() => onChange('approve')} title="通过"><LineIcon name="check" />{!compact && <span>通过</span>}</button>
+    <button className={value === 'reject' ? 'active reject' : ''} type="button" disabled={disabled} onClick={() => onChange('reject')} title="不通过"><LineIcon name="x" />{!compact && <span>不通过</span>}</button>
+    <button className={value === 'needs_attention' ? 'active attention' : ''} type="button" disabled={disabled} onClick={() => onChange('needs_attention')} title="需关注"><LineIcon name="pin" />{!compact && <span>需关注</span>}</button>
+  </div>;
+}
+
 function formatNumber(value: number, digits = 0) {
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value || 0);
 }
 
 function formatDate(value: number) {
   return value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-';
+}
+
+function formatPreciseDate(value: number | null | undefined) {
+  return value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+}
+
+function formatDuration(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return '-';
+  if (value < 1000) return `${Math.max(0, Math.round(value))} ms`;
+  const seconds = value / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒`;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${minutes.toFixed(minutes < 10 ? 1 : 0)} 分钟`;
+  const hours = minutes / 60;
+  return `${hours.toFixed(hours < 10 ? 1 : 0)} 小时`;
 }
 
 function parseApiError(data: unknown, status: number) {
@@ -211,8 +242,10 @@ export default function Evaluations() {
   const [selectedRunId, setSelectedRunId] = useState('');
   const [report, setReport] = useState<Report | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
-  const [selectedAttempt, setSelectedAttempt] = useState<Attempt | null>(null);
+  const [selectedAttempt, setSelectedAttempt] = useState<ReviewAttempt | null>(null);
   const [selectedGroupKey, setSelectedGroupKey] = useState('');
+  const [evidenceSaveState, setEvidenceSaveState] = useState<Record<string, EvidenceSaveEntry>>({});
+  const [evidenceComments, setEvidenceComments] = useState<Record<string, string>>({});
 
   const [projectForm, setProjectForm] = useState({ name: '', description: '', type: 'qa' as EvaluationType });
   const [datasetForm, setDatasetForm] = useState({ name: '', description: '', type: 'qa' as EvaluationType, mode: 'manual' as 'manual' | 'import', format: 'json' as 'json' | 'jsonl' | 'csv', importText: '' });
@@ -220,9 +253,6 @@ export default function Evaluations() {
   const [rubricForm, setRubricForm] = useState({ name: '', description: '', type: 'qa' as EvaluationType, passThreshold: 70, autoWeight: 60, judgeWeight: 40, judgeModel: '', judgePrompt: '' });
   const [runForm, setRunForm] = useState({ name: '', projectId: '', datasetVersionId: '', rubricId: '', useMemory: false, concurrency: 1, reviewPolicy: 'single' as 'single' | 'consensus', reviewerSubs: [] as string[], reviewRequiredCount: 2, maxTokens: '', maxCostUsd: '' });
   const [candidateForms, setCandidateForms] = useState<CandidateForm[]>([{ id: uid(), source: 'online', alias: '', name: '', agentId: '', model: '', repeatCount: 1, offlineAnswersText: '{}' }]);
-  const [reviewForm, setReviewForm] = useState({ decision: 'approve' as 'approve' | 'reject', comment: '' });
-  const [caseReviewForm, setCaseReviewForm] = useState({ decision: 'approve' as EvidenceDecision, comment: '' });
-  const [attemptReviewForm, setAttemptReviewForm] = useState({ decision: 'approve' as EvidenceDecision, comment: '' });
 
   const loadOverview = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -300,6 +330,8 @@ export default function Evaluations() {
   const pendingReviews = overview.metrics.pendingReviewRuns;
   const selectedProject = overview.projects.find(project => project.id === projectScope) || null;
   const selectedReviewGroup = report?.reviewMatrix.groups.find(group => `${group.candidateId}:${group.caseId}` === selectedGroupKey) || null;
+  const selectedGroupSaveKey = selectedReviewGroup ? `case:${selectedReviewGroup.candidateId}:${selectedReviewGroup.caseId}` : '';
+  const selectedAttemptSaveKey = selectedAttempt ? `attempt:${selectedAttempt.id}` : '';
   const changeProjectScope = (value: string) => {
     setProjectScope(value);
     setSelectedRunId('');
@@ -395,32 +427,54 @@ export default function Evaluations() {
   const startRun = (run: Run) => mutate(() => api(`/api/evaluations/runs/${run.id}/start`, { method: 'POST', body: '{}' }), '评测已进入队列');
   const cancelRun = (run: Run) => mutate(() => api(`/api/evaluations/runs/${run.id}/cancel`, { method: 'POST', body: '{}' }), '评测已取消');
 
-  const submitReview = () => {
-    if (!activeRun) return;
-    mutate(() => api(`/api/evaluations/runs/${activeRun.id}/review`, {
-      method: 'POST',
-      body: JSON.stringify({ ...reviewForm, finalize: isAdmin }),
-    }), reviewForm.decision === 'approve' ? '终审已通过' : '终审已驳回').then(() => { void loadReport(activeRun.id, true); });
+  const caseReviewKey = (group: ReviewGroup) => `case:${group.candidateId}:${group.caseId}`;
+  const attemptReviewKey = (attempt: ReviewAttempt) => `attempt:${attempt.id}`;
+
+  const applyEvidenceReviewResult = (result: EvidenceReviewResult) => {
+    setReport(current => current && current.run.id === result.run.id
+      ? { ...current, run: result.run, reviewMatrix: result.reviewMatrix }
+      : current);
+    if (selectedAttempt) {
+      const latestAttempt = result.reviewMatrix.groups.flatMap(group => group.attempts).find(attempt => attempt.id === selectedAttempt.id);
+      if (latestAttempt) setSelectedAttempt(latestAttempt);
+    }
+    if (result.autoCompleted) setNotice(result.run.reviewDecision === 'approved' ? '全部证据已通过，报告已就绪' : '证据审核已完成，报告已就绪');
+    void loadOverview(true);
+    void loadReport(result.run.id, true);
   };
 
-  const submitCaseReview = () => {
-    if (!report || !selectedReviewGroup) return;
-    mutate(() => api(`/api/evaluations/runs/${report.run.id}/case-reviews`, {
-      method: 'POST',
-      body: JSON.stringify({
-        candidateId: selectedReviewGroup.candidateId,
-        caseId: selectedReviewGroup.caseId,
-        ...caseReviewForm,
-      }),
-    }), '用例审核结果已提交').then(() => { void loadReport(report.run.id, true); });
+  const saveCaseReview = async (group: ReviewGroup, decision: EvidenceDecision) => {
+    if (!report || report.run.status !== 'awaiting_review') return;
+    const key = caseReviewKey(group);
+    if (evidenceSaveState[key]?.status === 'saving') return;
+    setEvidenceSaveState(state => ({ ...state, [key]: { status: 'saving' } }));
+    try {
+      const result = await api<EvidenceReviewResult>(`/api/evaluations/runs/${report.run.id}/case-reviews`, {
+        method: 'POST',
+        body: JSON.stringify({ candidateId: group.candidateId, caseId: group.caseId, decision, comment: evidenceComments[key] || '' }),
+      });
+      applyEvidenceReviewResult(result);
+      setEvidenceSaveState(state => ({ ...state, [key]: { status: 'saved' } }));
+    } catch (saveError) {
+      setEvidenceSaveState(state => ({ ...state, [key]: { status: 'error', message: (saveError as Error).message } }));
+    }
   };
 
-  const submitAttemptReview = () => {
-    if (!report || !selectedAttempt) return;
-    mutate(() => api(`/api/evaluations/runs/${report.run.id}/attempt-reviews`, {
-      method: 'POST',
-      body: JSON.stringify({ attemptId: selectedAttempt.id, ...attemptReviewForm }),
-    }), '单次尝试审核结果已提交').then(() => { void loadReport(report.run.id, true); });
+  const saveAttemptReview = async (attempt: ReviewAttempt, decision: EvidenceDecision) => {
+    if (!report || report.run.status !== 'awaiting_review') return;
+    const key = attemptReviewKey(attempt);
+    if (evidenceSaveState[key]?.status === 'saving') return;
+    setEvidenceSaveState(state => ({ ...state, [key]: { status: 'saving' } }));
+    try {
+      const result = await api<EvidenceReviewResult>(`/api/evaluations/runs/${report.run.id}/attempt-reviews`, {
+        method: 'POST',
+        body: JSON.stringify({ attemptId: attempt.id, decision, comment: evidenceComments[key] || '' }),
+      });
+      applyEvidenceReviewResult(result);
+      setEvidenceSaveState(state => ({ ...state, [key]: { status: 'saved' } }));
+    } catch (saveError) {
+      setEvidenceSaveState(state => ({ ...state, [key]: { status: 'error', message: (saveError as Error).message } }));
+    }
   };
 
   const openRunModal = () => {
@@ -444,9 +498,9 @@ export default function Evaluations() {
       <div className="evaluation-toolbar">
         <div className="evaluation-tabs" role="tablist" aria-label="评估系统视图">
           {((isAdmin ? [
-            ['runs', '运行'], ['datasets', '测试集'], ['rubrics', '评分模板'], ['reviews', `终审${pendingReviews ? ` ${pendingReviews}` : ''}`],
+            ['runs', '运行'], ['datasets', '测试集'], ['rubrics', '评分模板'], ['reviews', `审核${pendingReviews ? ` ${pendingReviews}` : ''}`],
           ] : [
-            ['runs', '运行'], ['reviews', `终审${pendingReviews ? ` ${pendingReviews}` : ''}`],
+            ['runs', '运行'], ['reviews', `审核${pendingReviews ? ` ${pendingReviews}` : ''}`],
           ]) as Array<[Tab, string]>).map(([key, label]) => (
             <button key={key} type="button" className={tab === key ? 'active' : ''} onClick={() => setTab(key)} role="tab" aria-selected={tab === key}>{label}</button>
           ))}
@@ -474,7 +528,7 @@ export default function Evaluations() {
         <div><span>进行中</span><strong>{formatNumber(overview.metrics.runningRuns)}</strong></div>
         {selectedProject
           ? <div><span>样本通过率</span><strong>{overview.metrics.passRate == null ? '-' : `${formatNumber(overview.metrics.passRate * 100, 1)}%`}</strong></div>
-          : <div><span>待终审</span><strong>{formatNumber(overview.metrics.pendingReviewRuns)}</strong></div>}
+          : <div><span>待审核</span><strong>{formatNumber(overview.metrics.pendingReviewRuns)}</strong></div>}
         {selectedProject
           ? <div><span>待审核样本</span><strong>{formatNumber(overview.metrics.pendingEvidenceReviews)}</strong></div>
           : <div><span>已完成</span><strong>{formatNumber(overview.metrics.completedRuns)}</strong></div>}
@@ -535,51 +589,48 @@ export default function Evaluations() {
                         <span>并发 {report.run.progress?.running || 0}/{report.run.concurrency || 1}</span>
                         <button className="icon-btn" type="button" onClick={() => downloadJson(`${report.run.name}-report.json`, report)} title="导出 JSON" aria-label="导出 JSON"><LineIcon name="download" /></button>
                       </div>
+                      <div className="evaluation-run-timeline">
+                        <span>开始<strong>{formatPreciseDate(report.run.startedAt)}</strong></span>
+                        <span>结束<strong>{report.run.completedAt ? formatPreciseDate(report.run.completedAt) : report.run.startedAt ? '进行中' : '-'}</strong></span>
+                        <span>总耗时<strong>{report.run.startedAt ? formatDuration((report.run.completedAt || Date.now()) - report.run.startedAt) : '-'}</strong></span>
+                      </div>
                       {report.run.errorMessage && <div className="evaluation-run-warning">{report.run.errorMessage}</div>}
                       <div className="evaluation-ranking">
-                        <div className="evaluation-subhead"><h3>候选排行</h3><span>综合分 / 稳定性 / 成本</span></div>
+                        <div className="evaluation-subhead"><h3>候选排行</h3><span>综合分 / 稳定性 / 耗时 / 成本</span></div>
                         {report.rankings.map((ranking, index) => (
                           <div className="evaluation-rank-row" key={ranking.candidateId}>
                             <span className="evaluation-rank-index">{index + 1}</span>
                             <div><strong>{ranking.name}</strong><span>{ranking.alias ? `${ranking.alias} · ` : ''}{ranking.model || ranking.source}</span></div>
                             <div className="evaluation-rank-score"><strong>{ranking.averageScore.toFixed(1)}</strong><span>± {ranking.standardDeviation.toFixed(1)}</span></div>
-                            <div className="evaluation-rank-meta"><span>{Math.round(ranking.passRate * 100)}% 通过</span><span>{formatNumber(ranking.totalTokens)} tok</span><span>${ranking.totalCostUsd.toFixed(3)}</span></div>
+                            <div className="evaluation-rank-meta"><span>{Math.round(ranking.passRate * 100)}% 通过</span><span>{formatDuration(ranking.averageDurationMs)}/次</span><span>{formatNumber(ranking.totalTokens)} tok</span><span>${ranking.totalCostUsd.toFixed(3)}</span></div>
                           </div>
                         ))}
                       </div>
                       <div className="evaluation-attempts">
                         <div className="evaluation-subhead"><h3>证据审核</h3><span>{report.reviewMatrix.summary.reviewed}/{report.reviewMatrix.summary.total} 已人工审核</span></div>
                         <div className="evaluation-review-matrix">
-                          {report.reviewMatrix.groups.map(group => (
-                            <button
-                              key={`${group.candidateId}:${group.caseId}`}
-                              type="button"
-                              className={`evaluation-review-cell ${evidenceDecisionClass(group.decision)}`}
-                              onClick={() => {
+                          {report.reviewMatrix.groups.map((group) => {
+                            const key = caseReviewKey(group);
+                            const saveState = evidenceSaveState[key] || { status: 'idle' as const };
+                            return <article key={`${group.candidateId}:${group.caseId}`} className={`evaluation-review-cell ${evidenceDecisionClass(group.decision)}`}>
+                              <button className="evaluation-review-cell-main" type="button" onClick={() => {
                                 setSelectedGroupKey(`${group.candidateId}:${group.caseId}`);
                                 setSelectedAttempt(null);
-                                setCaseReviewForm({ decision: group.decision, comment: group.reviews[0]?.comment || '' });
-                              }}
-                            >
-                              <span>{group.caseExternalId}</span>
-                              <strong>{group.candidateName}</strong>
-                              {group.candidateAlias && <small>{group.candidateAlias}</small>}
-                              <em>{group.attempts.length} 次 · {group.humanReviewed ? '已审' : '未审'} · {evidenceDecisionLabel(group.decision)}</em>
-                            </button>
-                          ))}
+                                setEvidenceComments(comments => ({ ...comments, [key]: comments[key] ?? group.reviews[0]?.comment ?? '' }));
+                              }}>
+                                <span>{group.caseExternalId}</span>
+                                <strong>{group.candidateName}</strong>
+                                {group.candidateAlias && <small>{group.candidateAlias}</small>}
+                                <em>{group.attempts.length} 次 · {formatDuration(group.durationMs)} · {group.humanReviewed ? evidenceDecisionLabel(group.decision) : '未审核'}</em>
+                              </button>
+                              <div className="evaluation-review-cell-actions">
+                                <EvidenceDecisionButtons value={group.humanReviewed ? group.decision : null} compact disabled={report.run.status !== 'awaiting_review' || saveState.status === 'saving'} onChange={decision => { void saveCaseReview(group, decision); }} />
+                                <span className={`evaluation-save-state ${saveState.status}`}>{saveState.status === 'saving' ? '保存中' : saveState.status === 'saved' ? '已保存' : saveState.status === 'error' ? '重试' : ''}</span>
+                              </div>
+                            </article>;
+                          })}
                         </div>
                       </div>
-                      {report.run.status === 'awaiting_review' && (
-                        <div className="evaluation-review-box">
-                          <div className="evaluation-subhead"><h3>人工终审</h3><span>{report.assignments.filter(item => item.status === 'submitted').length}/{report.assignments.length}</span></div>
-                          <div className="evaluation-review-choice">
-                            <button className={reviewForm.decision === 'approve' ? 'active approve' : ''} type="button" onClick={() => setReviewForm(form => ({ ...form, decision: 'approve' }))}><LineIcon name="check" />通过</button>
-                            <button className={reviewForm.decision === 'reject' ? 'active reject' : ''} type="button" onClick={() => setReviewForm(form => ({ ...form, decision: 'reject' }))}><LineIcon name="x" />驳回</button>
-                          </div>
-                          <textarea value={reviewForm.comment} onChange={event => setReviewForm(form => ({ ...form, comment: event.target.value }))} placeholder="终审备注" rows={3} />
-                          <button className="btn btn-primary" type="button" disabled={busy} onClick={submitReview}>{busy ? '提交中...' : '提交终审'}</button>
-                        </div>
-                      )}
                     </>
                   )}
                 </>
@@ -617,9 +668,9 @@ export default function Evaluations() {
 
       {tab === 'reviews' && (
         <section className="evaluation-section">
-          <div className="evaluation-section-head"><div><h2>终审队列</h2><span>低置信度、失败与分歧运行</span></div></div>
+          <div className="evaluation-section-head"><div><h2>审核队列</h2><span>证据未完成、需关注与分歧运行</span></div></div>
           <div className="table-wrap"><table className="evaluation-table"><thead><tr><th>运行</th><th>类型</th><th>候选</th><th>风险</th><th>更新时间</th><th /></tr></thead><tbody>
-            {overview.runs.filter(run => run.status === 'awaiting_review' || run.reviewConflict).length === 0 && <tr><td colSpan={6} className="evaluation-empty">暂无待终审运行</td></tr>}
+            {overview.runs.filter(run => run.status === 'awaiting_review' || run.reviewConflict).length === 0 && <tr><td colSpan={6} className="evaluation-empty">暂无待审核运行</td></tr>}
             {overview.runs.filter(run => run.status === 'awaiting_review' || run.reviewConflict).map(run => <tr key={run.id}><td><strong>{run.name}</strong><span>{run.errorMessage || '自动与裁判阶段已结束'}</span></td><td>{typeLabel(run.type)}</td><td>{run.candidates?.length || 0}</td><td>{run.reviewConflict ? <span className="badge badge-danger">审核分歧</span> : run.progress?.failed ? <span className="badge badge-warning">{run.progress.failed} 失败</span> : <span className="badge badge-info">待签署</span>}</td><td>{formatDate(run.updatedAt)}</td><td><button className="btn btn-sm" onClick={() => { setTab('runs'); void loadReport(run.id); }}>审核</button></td></tr>)}
           </tbody></table></div>
         </section>
@@ -672,7 +723,7 @@ export default function Evaluations() {
                   {candidateForms.length > 1 && <button className="icon-btn danger" type="button" onClick={() => setCandidateForms(forms => forms.filter(item => item.id !== candidate.id))} aria-label="删除候选"><LineIcon name="trash" /></button>}
                 </div>)}
               </div>
-              <div className="evaluation-form-section"><div className="evaluation-subhead"><h3>终审与预算</h3><span>{overview.sandbox.reason}</span></div><div className="evaluation-grid-4"><div className="evaluation-field"><label>候选并发</label><input type="number" min="1" max={overview.worker?.allowedConcurrency || overview.worker?.concurrency || 10} value={runForm.concurrency} onChange={event => setRunForm(form => ({ ...form, concurrency: Number(event.target.value) }))} /></div><div className="evaluation-field"><label>终审策略</label><select value={runForm.reviewPolicy} onChange={event => setRunForm(form => ({ ...form, reviewPolicy: event.target.value as 'single' | 'consensus' }))}><option value="single">一人通过</option><option value="consensus">多人共识</option></select></div><div className="evaluation-field"><label>Token 上限</label><input inputMode="numeric" value={runForm.maxTokens} onChange={event => setRunForm(form => ({ ...form, maxTokens: event.target.value.replace(/\D/g, '') }))} /></div><div className="evaluation-field"><label>费用上限 USD</label><input inputMode="decimal" value={runForm.maxCostUsd} onChange={event => setRunForm(form => ({ ...form, maxCostUsd: event.target.value.replace(/[^\d.]/g, '') }))} /></div></div>
+              <div className="evaluation-form-section"><div className="evaluation-subhead"><h3>审核与预算</h3><span>{overview.sandbox.reason}</span></div><div className="evaluation-grid-4"><div className="evaluation-field"><label>候选并发</label><input type="number" min="1" max={overview.worker?.allowedConcurrency || overview.worker?.concurrency || 10} value={runForm.concurrency} onChange={event => setRunForm(form => ({ ...form, concurrency: Number(event.target.value) }))} /></div><div className="evaluation-field"><label>审核策略</label><select value={runForm.reviewPolicy} onChange={event => setRunForm(form => ({ ...form, reviewPolicy: event.target.value as 'single' | 'consensus' }))}><option value="single">一人审核</option><option value="consensus">多人共识</option></select></div><div className="evaluation-field"><label>Token 上限</label><input inputMode="numeric" value={runForm.maxTokens} onChange={event => setRunForm(form => ({ ...form, maxTokens: event.target.value.replace(/\D/g, '') }))} /></div><div className="evaluation-field"><label>费用上限 USD</label><input inputMode="decimal" value={runForm.maxCostUsd} onChange={event => setRunForm(form => ({ ...form, maxCostUsd: event.target.value.replace(/[^\d.]/g, '') }))} /></div></div>
                 <div className="evaluation-field"><label>审核人</label><div className="evaluation-reviewers">{reviewers.map(reviewer => { const key = reviewerKey(reviewer); return key ? <label key={key}><input type="checkbox" checked={runForm.reviewerSubs.includes(key)} onChange={event => setRunForm(form => ({ ...form, reviewerSubs: event.target.checked ? [...form.reviewerSubs, key] : form.reviewerSubs.filter(item => item !== key) }))} /><span>{reviewerLabel(reviewer)}</span><em>{reviewer.role}</em></label> : null; })}</div></div>
               </div>
             </div>}
@@ -700,23 +751,21 @@ export default function Evaluations() {
           <aside className="evaluation-evidence" aria-label="评测证据">
             <div className="evaluation-detail-head"><div><span className="evaluation-detail-kicker">{selectedReviewGroup.caseExternalId}</span><h2>{selectedReviewGroup.candidateName}</h2>{selectedReviewGroup.candidateAlias && <small>{selectedReviewGroup.candidateAlias}</small>}</div><button className="icon-btn" onClick={() => { setSelectedGroupKey(''); setSelectedAttempt(null); }} aria-label="关闭"><LineIcon name="x" /></button></div>
             <div className="evaluation-score-strip"><div><span>自动结论</span><strong>{evidenceDecisionLabel(selectedReviewGroup.automaticDecision)}</strong></div><div><span>人工结论</span><strong>{selectedReviewGroup.humanReviewed ? evidenceDecisionLabel(selectedReviewGroup.decision) : '-'}</strong></div><div><span>重复执行</span><strong>{selectedReviewGroup.attempts.length}</strong></div></div>
+            <div className="evaluation-time-grid"><span>开始<strong>{formatPreciseDate(selectedReviewGroup.startedAt)}</strong></span><span>结束<strong>{formatPreciseDate(selectedReviewGroup.completedAt)}</strong></span><span>墙钟耗时<strong>{formatDuration(selectedReviewGroup.durationMs)}</strong></span><span>平均执行<strong>{formatDuration(selectedReviewGroup.averageAttemptDurationMs)}</strong></span></div>
             <section><h3>评测用例</h3><p className="evaluation-judge-reason">{selectedReviewGroup.prompt}</p></section>
-            <section className="evaluation-evidence-review"><div className="evaluation-subhead"><h3>用例审核</h3><span>作用于该候选的全部重复执行</span></div><div className="evaluation-review-choice">
-              <button className={caseReviewForm.decision === 'approve' ? 'active approve' : ''} type="button" onClick={() => setCaseReviewForm(form => ({ ...form, decision: 'approve' }))}><LineIcon name="check" />通过</button>
-              <button className={caseReviewForm.decision === 'reject' ? 'active reject' : ''} type="button" onClick={() => setCaseReviewForm(form => ({ ...form, decision: 'reject' }))}><LineIcon name="x" />不通过</button>
-              <button className={caseReviewForm.decision === 'needs_attention' ? 'active attention' : ''} type="button" onClick={() => setCaseReviewForm(form => ({ ...form, decision: 'needs_attention' }))}><LineIcon name="pin" />需关注</button>
-            </div><textarea value={caseReviewForm.comment} onChange={event => setCaseReviewForm(form => ({ ...form, comment: event.target.value }))} placeholder="审核备注" rows={2} /><button className="btn btn-primary" type="button" disabled={busy} onClick={submitCaseReview}>提交用例审核</button></section>
-            <section><div className="evaluation-subhead"><h3>重复尝试</h3><span>可逐次覆盖</span></div><div className="evaluation-evidence-attempts">{selectedReviewGroup.attempts.map(attempt => <button key={attempt.id} type="button" className={`${selectedAttempt?.id === attempt.id ? 'selected ' : ''}${evidenceDecisionClass(attempt.effectiveDecision)}`} onClick={() => { setSelectedAttempt(attempt); setAttemptReviewForm({ decision: attempt.reviewDecision || attempt.effectiveDecision, comment: attempt.reviews[0]?.comment || '' }); }}><span>#{attempt.repetition}</span><strong>{attempt.finalScore == null ? '-' : attempt.finalScore.toFixed(1)}</strong><em>{evidenceDecisionLabel(attempt.effectiveDecision)}</em></button>)}</div></section>
+            <section className="evaluation-evidence-review"><div className="evaluation-subhead"><h3>用例审核</h3><span className={`evaluation-save-state ${evidenceSaveState[selectedGroupSaveKey]?.status || 'idle'}`}>{evidenceSaveState[selectedGroupSaveKey]?.status === 'saving' ? '保存中' : evidenceSaveState[selectedGroupSaveKey]?.status === 'saved' ? '已保存' : evidenceSaveState[selectedGroupSaveKey]?.status === 'error' ? evidenceSaveState[selectedGroupSaveKey]?.message || '保存失败' : ''}</span></div><EvidenceDecisionButtons value={selectedReviewGroup.humanReviewed ? selectedReviewGroup.decision : null} disabled={report?.run.status !== 'awaiting_review' || evidenceSaveState[selectedGroupSaveKey]?.status === 'saving'} onChange={decision => { void saveCaseReview(selectedReviewGroup, decision); }} /><details className="evaluation-review-note"><summary>备注</summary><textarea value={evidenceComments[selectedGroupSaveKey] ?? selectedReviewGroup.reviews[0]?.comment ?? ''} onChange={event => setEvidenceComments(comments => ({ ...comments, [selectedGroupSaveKey]: event.target.value }))} rows={2} /></details></section>
+            <section><div className="evaluation-subhead"><h3>重复尝试</h3><span>展开证据或直接改判</span></div><div className="evaluation-evidence-attempts">{selectedReviewGroup.attempts.map((attempt) => {
+              const key = attemptReviewKey(attempt);
+              const saveState = evidenceSaveState[key] || { status: 'idle' as const };
+              return <article key={attempt.id} className={`${selectedAttempt?.id === attempt.id ? 'selected ' : ''}${evidenceDecisionClass(attempt.effectiveDecision)}`}><button className="evaluation-evidence-attempt-main" type="button" onClick={() => { setSelectedAttempt(attempt); setEvidenceComments(comments => ({ ...comments, [key]: comments[key] ?? attempt.reviews[0]?.comment ?? '' })); }}><span>#{attempt.repetition}</span><strong>{attempt.finalScore == null ? '-' : attempt.finalScore.toFixed(1)}</strong><em>{formatDuration(attempt.durationMs)}</em></button><EvidenceDecisionButtons value={attempt.reviewDecision} compact disabled={report?.run.status !== 'awaiting_review' || saveState.status === 'saving'} onChange={decision => { void saveAttemptReview(attempt, decision); }} /><span className={`evaluation-save-state ${saveState.status}`}>{saveState.status === 'saving' ? '保存中' : saveState.status === 'saved' ? '已保存' : saveState.status === 'error' ? '重试' : ''}</span></article>;
+            })}</div></section>
             {selectedAttempt && <>
+              <div className="evaluation-time-grid"><span>开始<strong>{formatPreciseDate(selectedAttempt.startedAt)}</strong></span><span>结束<strong>{formatPreciseDate(selectedAttempt.completedAt)}</strong></span><span>执行耗时<strong>{formatDuration(selectedAttempt.durationMs)}</strong></span><span>墙钟跨度<strong>{selectedAttempt.startedAt ? formatDuration(selectedAttempt.completedAt - selectedAttempt.startedAt) : '-'}</strong></span></div>
               {selectedAttempt.errorMessage && <div className="evaluation-run-warning">{selectedAttempt.errorMessage}</div>}
               <section><h3>候选输出</h3><pre>{selectedAttempt.outputText || '无输出'}</pre></section>
               <section><h3>自动指标</h3>{selectedAttempt.metrics.filter(metric => metric.applied !== false).map((metric, index) => <div className="evaluation-metric" key={`${metric.key}-${index}`}><div><strong>{metric.label || metric.key}</strong><span>{Number(metric.score || 0).toFixed(1)}</span></div><p>{metric.evidence || '无证据说明'}</p></div>)}</section>
               {selectedAttempt.judgeReason && <section><h3>裁判理由</h3><p className="evaluation-judge-reason">{selectedAttempt.judgeReason}</p><span className="evaluation-confidence">置信度 {selectedAttempt.judgeConfidence?.toFixed(2)}</span></section>}
-              <section className="evaluation-evidence-review"><div className="evaluation-subhead"><h3>单次尝试审核</h3><span>仅覆盖 #{selectedAttempt.repetition}</span></div><div className="evaluation-review-choice">
-                <button className={attemptReviewForm.decision === 'approve' ? 'active approve' : ''} type="button" onClick={() => setAttemptReviewForm(form => ({ ...form, decision: 'approve' }))}><LineIcon name="check" />通过</button>
-                <button className={attemptReviewForm.decision === 'reject' ? 'active reject' : ''} type="button" onClick={() => setAttemptReviewForm(form => ({ ...form, decision: 'reject' }))}><LineIcon name="x" />不通过</button>
-                <button className={attemptReviewForm.decision === 'needs_attention' ? 'active attention' : ''} type="button" onClick={() => setAttemptReviewForm(form => ({ ...form, decision: 'needs_attention' }))}><LineIcon name="pin" />需关注</button>
-              </div><textarea value={attemptReviewForm.comment} onChange={event => setAttemptReviewForm(form => ({ ...form, comment: event.target.value }))} placeholder="审核备注" rows={2} /><button className="btn btn-primary" type="button" disabled={busy} onClick={submitAttemptReview}>提交单次审核</button></section>
+              <details className="evaluation-review-note"><summary>单次尝试备注</summary><textarea value={evidenceComments[selectedAttemptSaveKey] ?? selectedAttempt.reviews[0]?.comment ?? ''} onChange={event => setEvidenceComments(comments => ({ ...comments, [selectedAttemptSaveKey]: event.target.value }))} rows={2} /></details>
             </>}
           </aside>
         </div>

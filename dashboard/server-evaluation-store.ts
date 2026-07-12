@@ -190,6 +190,7 @@ export type EvaluationAttempt = {
   durationMs: number;
   errorCode: string;
   errorMessage: string;
+  startedAt: number | null;
   createdAt: number;
   completedAt: number;
 };
@@ -240,6 +241,8 @@ export type EvaluationJob = {
   leaseUntil: number | null;
   errorCode: string;
   errorMessage: string;
+  startedAt: number | null;
+  completedAt: number | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -546,6 +549,7 @@ function mapAttempt(row: any): EvaluationAttempt {
     durationMs: row.duration_ms || 0,
     errorCode: row.error_code || '',
     errorMessage: row.error_message || '',
+    startedAt: row.started_at ?? null,
     createdAt: row.created_at,
     completedAt: row.completed_at,
   };
@@ -567,6 +571,8 @@ function mapJob(row: any): EvaluationJob {
     leaseUntil: row.lease_until ?? null,
     errorCode: row.error_code || '',
     errorMessage: row.error_message || '',
+    startedAt: row.started_at ?? null,
+    completedAt: row.completed_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -712,6 +718,8 @@ export function initializeEvaluationStore(databaseConnection: DatabaseSync) {
       lease_until INTEGER,
       error_code TEXT NOT NULL DEFAULT '',
       error_message TEXT NOT NULL DEFAULT '',
+      started_at INTEGER,
+      completed_at INTEGER,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -741,6 +749,7 @@ export function initializeEvaluationStore(databaseConnection: DatabaseSync) {
       duration_ms INTEGER NOT NULL DEFAULT 0,
       error_code TEXT NOT NULL DEFAULT '',
       error_message TEXT NOT NULL DEFAULT '',
+      started_at INTEGER,
       created_at INTEGER NOT NULL,
       completed_at INTEGER NOT NULL
     );
@@ -810,6 +819,17 @@ export function initializeEvaluationStore(databaseConnection: DatabaseSync) {
   const candidateColumns = db.prepare('PRAGMA table_info(evaluation_candidates)').all() as Array<{ name: string }>;
   if (!candidateColumns.some(column => column.name === 'alias')) {
     db.exec("ALTER TABLE evaluation_candidates ADD COLUMN alias TEXT NOT NULL DEFAULT ''");
+  }
+  const jobColumns = db.prepare('PRAGMA table_info(evaluation_jobs)').all() as Array<{ name: string }>;
+  if (!jobColumns.some(column => column.name === 'started_at')) {
+    db.exec('ALTER TABLE evaluation_jobs ADD COLUMN started_at INTEGER');
+  }
+  if (!jobColumns.some(column => column.name === 'completed_at')) {
+    db.exec('ALTER TABLE evaluation_jobs ADD COLUMN completed_at INTEGER');
+  }
+  const attemptColumns = db.prepare('PRAGMA table_info(evaluation_attempts)').all() as Array<{ name: string }>;
+  if (!attemptColumns.some(column => column.name === 'started_at')) {
+    db.exec('ALTER TABLE evaluation_attempts ADD COLUMN started_at INTEGER');
   }
 }
 
@@ -1346,7 +1366,8 @@ export function startEvaluationRun(tenantId: string, runId: string) {
       }
     } else {
       connection.prepare(`
-        UPDATE evaluation_jobs SET status = 'queued', lease_owner = NULL, lease_until = NULL, updated_at = ?
+        UPDATE evaluation_jobs SET status = 'queued', lease_owner = NULL, lease_until = NULL,
+          started_at = NULL, completed_at = NULL, updated_at = ?
         WHERE tenant_id = ? AND run_id = ? AND status = 'cancelled'
       `).run(timestamp, tenantId, runId);
     }
@@ -1375,9 +1396,10 @@ export function cancelEvaluationRun(tenantId: string, runId: string) {
       UPDATE evaluation_runs SET status = 'cancelled', updated_at = ?, completed_at = ? WHERE tenant_id = ? AND id = ?
     `).run(timestamp, timestamp, tenantId, runId);
     connection.prepare(`
-      UPDATE evaluation_jobs SET status = 'cancelled', lease_owner = NULL, lease_until = NULL, updated_at = ?
+      UPDATE evaluation_jobs SET status = 'cancelled', lease_owner = NULL, lease_until = NULL,
+        completed_at = ?, updated_at = ?
       WHERE tenant_id = ? AND run_id = ? AND status IN ('queued', 'running')
-    `).run(timestamp, tenantId, runId);
+    `).run(timestamp, timestamp, tenantId, runId);
     connection.exec('COMMIT');
   } catch (error) {
     connection.exec('ROLLBACK');
@@ -1403,7 +1425,8 @@ export function releaseEvaluationJob(jobId: string, errorCode = '', errorMessage
   const timestamp = now();
   database().prepare(`
     UPDATE evaluation_jobs
-    SET status = 'queued', lease_owner = NULL, lease_until = NULL, error_code = ?, error_message = ?, updated_at = ?
+    SET status = 'queued', lease_owner = NULL, lease_until = NULL, started_at = NULL, completed_at = NULL,
+      error_code = ?, error_message = ?, updated_at = ?
     WHERE id = ? AND status = 'running'
   `).run(errorCode, errorMessage, timestamp, jobId);
 }
@@ -1412,7 +1435,7 @@ export function recoverExpiredEvaluationJobs(at = now()) {
   return database().prepare(`
     UPDATE evaluation_jobs
     SET status = 'queued', lease_owner = NULL, lease_until = NULL, error_code = 'lease_expired',
-        error_message = 'Worker lease expired; job requeued', updated_at = ?
+        error_message = 'Worker lease expired; job requeued', started_at = NULL, completed_at = NULL, updated_at = ?
     WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until < ?
   `).run(at, at).changes;
 }
@@ -1453,16 +1476,26 @@ export function claimEvaluationJob(workerId: string, leaseMs = 120_000) {
     }
     connection.prepare(`
       UPDATE evaluation_jobs
-      SET status = 'running', attempts = attempts + 1, lease_owner = ?, lease_until = ?, updated_at = ?
+      SET status = 'running', attempts = attempts + 1, lease_owner = ?, lease_until = ?,
+        started_at = ?, completed_at = NULL, updated_at = ?
       WHERE id = ? AND status = 'queued'
-    `).run(workerId, timestamp + leaseMs, timestamp, row.id);
+    `).run(workerId, timestamp + leaseMs, timestamp, timestamp, row.id);
     if (row.kind === 'execute') {
       connection.prepare(`
         UPDATE evaluation_runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'queued'
       `).run(timestamp, row.run_id);
     }
     connection.exec('COMMIT');
-    return mapJob({ ...row, status: 'running', attempts: row.attempts + 1, lease_owner: workerId, lease_until: timestamp + leaseMs, updated_at: timestamp });
+    return mapJob({
+      ...row,
+      status: 'running',
+      attempts: row.attempts + 1,
+      lease_owner: workerId,
+      lease_until: timestamp + leaseMs,
+      started_at: timestamp,
+      completed_at: null,
+      updated_at: timestamp,
+    });
   } catch (error) {
     connection.exec('ROLLBACK');
     throw error;
@@ -1509,8 +1542,8 @@ export function completeEvaluationExecutionJob(jobId: string, result: {
     connection.prepare(`
       INSERT INTO evaluation_attempts (
         id, tenant_id, run_id, job_id, candidate_id, case_id, repetition, status, output_text, metrics_json,
-        auto_score, final_score, passed, input_tokens, output_tokens, cost_usd, duration_ms, created_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        auto_score, final_score, passed, input_tokens, output_tokens, cost_usd, duration_ms, started_at, created_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       attemptId,
       context.job.tenantId,
@@ -1528,13 +1561,14 @@ export function completeEvaluationExecutionJob(jobId: string, result: {
       boundedInteger(result.outputTokens, 0, 0, Number.MAX_SAFE_INTEGER),
       boundedNumber(result.costUsd, 0, 0, Number.MAX_SAFE_INTEGER),
       boundedInteger(result.durationMs, 0, 0, Number.MAX_SAFE_INTEGER),
+      context.job.startedAt,
       timestamp,
       timestamp,
     );
     connection.prepare(`
       UPDATE evaluation_jobs SET status = 'completed', attempt_id = ?, lease_owner = NULL, lease_until = NULL,
-        error_code = '', error_message = '', updated_at = ? WHERE id = ?
-    `).run(attemptId, timestamp, jobId);
+        error_code = '', error_message = '', completed_at = ?, updated_at = ? WHERE id = ?
+    `).run(attemptId, timestamp, timestamp, jobId);
     connection.prepare('UPDATE evaluation_runs SET updated_at = ? WHERE id = ?').run(timestamp, context.job.runId);
     connection.exec('COMMIT');
   } catch (error) {
@@ -1588,8 +1622,8 @@ export function completeEvaluationJudgeJob(jobId: string, result: {
     );
     connection.prepare(`
       UPDATE evaluation_jobs SET status = 'completed', lease_owner = NULL, lease_until = NULL,
-        error_code = '', error_message = '', updated_at = ? WHERE id = ?
-    `).run(timestamp, jobId);
+        error_code = '', error_message = '', completed_at = ?, updated_at = ? WHERE id = ?
+    `).run(timestamp, timestamp, jobId);
     connection.prepare('UPDATE evaluation_runs SET updated_at = ? WHERE id = ?').run(timestamp, context.job.runId);
     connection.exec('COMMIT');
   } catch (error) {
@@ -1612,8 +1646,8 @@ export function failEvaluationJob(jobId: string, error: { code?: string; message
       connection.prepare(`
         INSERT INTO evaluation_attempts (
           id, tenant_id, run_id, job_id, candidate_id, case_id, repetition, status, output_text, metrics_json,
-          auto_score, final_score, passed, error_code, error_message, created_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', '', '[]', 0, 0, 0, ?, ?, ?, ?)
+          auto_score, final_score, passed, error_code, error_message, started_at, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', '', '[]', 0, 0, 0, ?, ?, ?, ?, ?)
       `).run(
         attemptId,
         context.job.tenantId,
@@ -1624,18 +1658,19 @@ export function failEvaluationJob(jobId: string, error: { code?: string; message
         context.job.repetition,
         cleanText(error.code, '错误代码', 120, false) || 'execution_failed',
         cleanText(error.message, '错误信息', 10_000, false),
+        context.job.startedAt,
         timestamp,
         timestamp,
       );
       connection.prepare(`
         UPDATE evaluation_jobs SET status = 'failed', attempt_id = ?, lease_owner = NULL, lease_until = NULL,
-          error_code = ?, error_message = ?, updated_at = ? WHERE id = ?
-      `).run(attemptId, error.code || 'execution_failed', error.message, timestamp, jobId);
+          error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ?
+      `).run(attemptId, error.code || 'execution_failed', error.message, timestamp, timestamp, jobId);
     } else {
       connection.prepare(`
         UPDATE evaluation_jobs SET status = 'failed', lease_owner = NULL, lease_until = NULL,
-          error_code = ?, error_message = ?, updated_at = ? WHERE id = ?
-      `).run(error.code || 'judge_failed', error.message, timestamp, jobId);
+          error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ?
+      `).run(error.code || 'judge_failed', error.message, timestamp, timestamp, jobId);
     }
     connection.prepare('UPDATE evaluation_runs SET updated_at = ? WHERE id = ?').run(timestamp, context.job.runId);
     connection.exec('COMMIT');
@@ -1766,6 +1801,7 @@ export function submitEvaluationCaseReview(
 ) {
   const run = getEvaluationRun(tenantId, runId, false);
   if (!run) throw new EvaluationStoreError('not_found', '评测运行不存在');
+  if (run.status !== 'awaiting_review') throw new EvaluationStoreError('invalid_state', '运行当前不在证据审核阶段');
   const candidateId = cleanText(input.candidateId, '候选', 160);
   const caseId = cleanText(input.caseId, '用例', 160);
   const candidate = database().prepare(`
@@ -1799,7 +1835,7 @@ export function submitEvaluationCaseReview(
     review.id, tenantId, runId, candidateId, caseId, reviewerSub,
     review.decision, review.comment, review.createdAt,
   );
-  return review;
+  return finalizeEvaluationEvidenceReview(tenantId, runId, review);
 }
 
 export function submitEvaluationAttemptReview(
@@ -1810,6 +1846,7 @@ export function submitEvaluationAttemptReview(
 ) {
   const run = getEvaluationRun(tenantId, runId, false);
   if (!run) throw new EvaluationStoreError('not_found', '评测运行不存在');
+  if (run.status !== 'awaiting_review') throw new EvaluationStoreError('invalid_state', '运行当前不在证据审核阶段');
   const attemptId = cleanText(input.attemptId, '尝试', 160);
   const attempt = getEvaluationAttempt(tenantId, attemptId);
   if (!attempt || attempt.runId !== runId) throw new EvaluationStoreError('not_found', '审核尝试不存在');
@@ -1838,7 +1875,7 @@ export function submitEvaluationAttemptReview(
     review.id, tenantId, runId, review.candidateId, review.caseId, attemptId,
     reviewerSub, review.decision, review.comment, review.createdAt,
   );
-  return review;
+  return finalizeEvaluationEvidenceReview(tenantId, runId, review);
 }
 
 function listEvaluationCaseReviews(tenantId: string, runId: string) {
@@ -1910,6 +1947,10 @@ export function getEvaluationReviewMatrix(tenantId: string, runId: string) {
     const caseDecision = resolveEvidenceReviews(reviews, run);
     const automaticDecision = aggregateEvidenceDecisions(attemptDetails.map(attempt => attempt.automaticDecision));
     const attemptDecision = aggregateEvidenceDecisions(attemptDetails.map(attempt => attempt.effectiveDecision));
+    const startedTimes = attemptDetails.map(attempt => attempt.startedAt).filter((value): value is number => value !== null);
+    const completedTimes = attemptDetails.map(attempt => attempt.completedAt).filter((value): value is number => Number.isFinite(value));
+    const startedAt = startedTimes.length ? Math.min(...startedTimes) : null;
+    const completedAt = completedTimes.length ? Math.max(...completedTimes) : null;
     return [{
       candidateId,
       candidateName: candidate.name,
@@ -1923,6 +1964,12 @@ export function getEvaluationReviewMatrix(tenantId: string, runId: string) {
       reviewSource: caseDecision ? 'case_review' : attemptReviews.some(review => review.candidateId === candidateId && review.caseId === caseId) ? 'attempt_review' : 'automatic',
       reviews,
       humanReviewed: reviews.length > 0 || attemptDetails.some(attempt => attempt.reviews.length > 0),
+      startedAt,
+      completedAt,
+      durationMs: startedAt !== null && completedAt !== null ? Math.max(0, completedAt - startedAt) : null,
+      averageAttemptDurationMs: attemptDetails.length
+        ? attemptDetails.reduce((sum, attempt) => sum + attempt.durationMs, 0) / attemptDetails.length
+        : 0,
     }];
   });
   const passed = groups.filter(group => group.decision === 'approve').length;
@@ -1939,6 +1986,49 @@ export function getEvaluationReviewMatrix(tenantId: string, runId: string) {
       reviewed: groups.filter(group => group.humanReviewed).length,
       passRate: groups.length ? passed / groups.length : null,
     },
+  };
+}
+
+function finalizeEvaluationEvidenceReview(
+  tenantId: string,
+  runId: string,
+  review: EvaluationEvidenceReview,
+) {
+  let reviewMatrix = getEvaluationReviewMatrix(tenantId, runId);
+  let autoCompleted = false;
+  const ready = reviewMatrix.groups.length > 0
+    && reviewMatrix.groups.every(group => group.humanReviewed && (group.decision === 'approve' || group.decision === 'reject'));
+  if (ready) {
+    const timestamp = now();
+    const decision = reviewMatrix.groups.some(group => group.decision === 'reject') ? 'rejected' : 'approved';
+    const connection = database();
+    connection.exec('BEGIN IMMEDIATE');
+    try {
+      const updated = connection.prepare(`
+        UPDATE evaluation_runs
+        SET status = 'completed', review_decision = ?, review_conflict = 0, updated_at = ?, completed_at = ?
+        WHERE tenant_id = ? AND id = ? AND status = 'awaiting_review'
+      `).run(decision, timestamp, timestamp, tenantId, runId);
+      if (updated.changes > 0) {
+        connection.prepare(`
+          UPDATE evaluation_review_assignments
+          SET status = 'submitted', submitted_at = COALESCE(submitted_at, ?)
+          WHERE tenant_id = ? AND run_id = ?
+        `).run(timestamp, tenantId, runId);
+        autoCompleted = true;
+      }
+      connection.exec('COMMIT');
+    } catch (error) {
+      connection.exec('ROLLBACK');
+      throw error;
+    }
+    reviewMatrix = getEvaluationReviewMatrix(tenantId, runId);
+  }
+  return {
+    review,
+    run: getEvaluationRun(tenantId, runId)!,
+    reviewMatrix,
+    autoCompleted,
   };
 }
 
@@ -2084,6 +2174,8 @@ export function getEvaluationReport(tenantId: string, runId: string) {
     const rows = attempts.filter(attempt => attempt.candidateId === candidate.id);
     const groups = reviewMatrix.groups.filter(group => group.candidateId === candidate.id);
     const scores = rows.map(attempt => attempt.finalScore).filter((score): score is number => score !== null);
+    const startedTimes = rows.map(attempt => attempt.startedAt).filter((value): value is number => value !== null);
+    const completedTimes = rows.map(attempt => attempt.completedAt).filter((value): value is number => Number.isFinite(value));
     const averageScore = scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : 0;
     const variance = scores.length > 1
       ? scores.reduce((sum, score) => sum + ((score - averageScore) ** 2), 0) / scores.length
@@ -2103,6 +2195,9 @@ export function getEvaluationReport(tenantId: string, runId: string) {
       totalTokens: rows.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0),
       totalCostUsd: rows.reduce((sum, row) => sum + row.costUsd, 0),
       averageDurationMs: rows.length ? rows.reduce((sum, row) => sum + row.durationMs, 0) / rows.length : 0,
+      wallClockDurationMs: startedTimes.length && completedTimes.length
+        ? Math.max(0, Math.max(...completedTimes) - Math.min(...startedTimes))
+        : null,
     };
   }).sort((a, b) => b.averageScore - a.averageScore);
   return {

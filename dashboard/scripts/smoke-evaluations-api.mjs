@@ -97,6 +97,8 @@ for (let attempt = 0; attempt < 50; attempt += 1) {
 }
 assert.equal(report.run.status, 'awaiting_review');
 assert.equal(report.rankings[0].averageScore, 100);
+assert(report.rankings[0].wallClockDurationMs >= 0);
+assert(report.attempts.every(item => item.startedAt && item.completedAt >= item.startedAt));
 
 const scopedOverview = await request(`/api/evaluations/overview?projectId=${project.data.id}`, { token: adminToken });
 assert.equal(scopedOverview.data.metrics.projectId, project.data.id);
@@ -137,12 +139,14 @@ const deleted = await request(`/api/evaluations/projects/${disposable.data.id}`,
 });
 assert.equal(deleted.data.deleted, true);
 
-const reviewed = await request(`/api/evaluations/runs/${run.data.id}/review`, {
+const remainingGroup = granularReport.reviewMatrix.groups.find(group => group.caseId !== firstAttempt.caseId);
+const autoReviewed = await request(`/api/evaluations/runs/${run.data.id}/case-reviews`, {
   method: 'POST', token: memberToken,
-  body: JSON.stringify({ decision: 'approve', comment: 'API evidence checked' }),
+  body: JSON.stringify({ candidateId: remainingGroup.candidateId, caseId: remainingGroup.caseId, decision: 'approve', comment: 'all evidence ready' }),
 });
-assert.equal(reviewed.data.status, 'completed');
-assert.equal(reviewed.data.reviewDecision, 'approved');
+assert.equal(autoReviewed.data.autoCompleted, true);
+assert.equal(autoReviewed.data.run.status, 'completed');
+assert.equal(autoReviewed.data.run.reviewDecision, 'approved');
 const completedOverview = await request(`/api/evaluations/overview?projectId=${project.data.id}`, { token: adminToken });
 assert.equal(completedOverview.data.metrics.candidateCaseTotal, 2);
 assert.equal(completedOverview.data.metrics.candidateCasePassed, 2);
@@ -152,7 +156,7 @@ console.log(JSON.stringify({
   runId: run.data.id,
   checks: [
     'admin-crud', 'member-assignment-visibility', 'member-admin-denied', 'worker-execution',
-    'offline-report', 'project-scoped-overview', 'attempt-review', 'case-review',
-    'active-project-delete-blocked', 'project-archive-restore-delete', 'member-review', 'final-approval',
+    'offline-report', 'timeline-fields', 'project-scoped-overview', 'attempt-review', 'case-review',
+    'active-project-delete-blocked', 'project-archive-restore-delete', 'auto-review-complete',
   ],
 }));

@@ -519,7 +519,7 @@
 
 .evaluation-rank-meta {
   display: grid;
-  grid-template-columns: repeat(3, auto);
+  grid-template-columns: repeat(4, auto);
   gap: 6px;
   justify-content: end;
   color: var(--ink-secondary);
@@ -568,30 +568,44 @@
 
 .evaluation-review-cell {
   display: grid;
-  gap: 3px;
   min-width: 0;
-  min-height: 78px;
-  padding: 8px;
+  min-height: 112px;
   border: 1px solid var(--border);
   border-top-width: 3px;
   border-radius: 5px;
   background: var(--bg-card);
   color: var(--ink-secondary);
   text-align: left;
-  cursor: pointer;
+  overflow: hidden;
 }
 
 .evaluation-review-cell:hover { border-color: var(--accent); }
 .evaluation-review-cell.passed { border-top-color: var(--success); }
 .evaluation-review-cell.failed { border-top-color: var(--danger); }
 .evaluation-review-cell.weak { border-top-color: var(--warning); }
-.evaluation-review-cell > span { color: var(--ink-muted); font-family: var(--font-mono); font-size: 8px; }
-.evaluation-review-cell > strong,
-.evaluation-review-cell > small,
-.evaluation-review-cell > em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.evaluation-review-cell > strong { color: var(--ink); font-size: 10px; }
-.evaluation-review-cell > small { color: var(--ink-secondary); font-size: 9px; }
-.evaluation-review-cell > em { align-self: end; color: var(--ink-muted); font-size: 8px; font-style: normal; }
+.evaluation-review-cell-main { display: grid; gap: 3px; min-width: 0; padding: 8px; border: 0; background: transparent; color: var(--ink-secondary); text-align: left; cursor: pointer; }
+.evaluation-review-cell-main > span { color: var(--ink-muted); font-family: var(--font-mono); font-size: 8px; }
+.evaluation-review-cell-main > strong,
+.evaluation-review-cell-main > small,
+.evaluation-review-cell-main > em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evaluation-review-cell-main > strong { color: var(--ink); font-size: 10px; }
+.evaluation-review-cell-main > small { color: var(--ink-secondary); font-size: 9px; }
+.evaluation-review-cell-main > em { align-self: end; color: var(--ink-muted); font-size: 8px; font-style: normal; }
+.evaluation-review-cell-actions { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 5px 7px; border-top: 1px solid var(--eval-rule); background: var(--bg-hover); }
+
+.evaluation-decision-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 9px 0; }
+.evaluation-decision-buttons button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 34px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-card); color: var(--ink-secondary); font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+.evaluation-decision-buttons.compact { display: flex; gap: 3px; margin: 0; }
+.evaluation-decision-buttons.compact button { width: 25px; min-height: 25px; padding: 3px; }
+.evaluation-decision-buttons button svg { width: 13px; height: 13px; }
+.evaluation-decision-buttons button:disabled { cursor: wait; opacity: .55; }
+.evaluation-decision-buttons button.active.approve { border-color: var(--success); background: var(--success-bg); color: var(--success); }
+.evaluation-decision-buttons button.active.reject { border-color: var(--danger); background: var(--danger-bg); color: var(--danger); }
+.evaluation-decision-buttons button.active.attention { border-color: var(--warning); background: var(--warning-bg); color: var(--warning); }
+.evaluation-save-state { min-width: 34px; color: var(--ink-muted); font-family: var(--font-mono); font-size: 8px; text-align: right; }
+.evaluation-save-state.saving { color: var(--accent); }
+.evaluation-save-state.saved { color: var(--success); }
+.evaluation-save-state.error { color: var(--danger); }
 
 .evaluation-review-box textarea,
 .evaluation-field textarea,
@@ -931,6 +945,17 @@
 .evaluation-score-strip span { color: var(--ink-secondary); font-size: 9px; }
 .evaluation-score-strip strong { font-family: var(--font-mono); font-size: 18px; }
 
+.evaluation-run-timeline,
+.evaluation-time-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--eval-rule); background: var(--bg-card); }
+.evaluation-time-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 12px 0; }
+.evaluation-run-timeline > span,
+.evaluation-time-grid > span { display: grid; gap: 3px; min-width: 0; padding: 8px 10px; color: var(--ink-muted); font-size: 8px; }
+.evaluation-run-timeline > span + span,
+.evaluation-time-grid > span:nth-child(even) { border-left: 1px solid var(--eval-rule); }
+.evaluation-time-grid > span:nth-child(n + 3) { border-top: 1px solid var(--eval-rule); }
+.evaluation-run-timeline strong,
+.evaluation-time-grid strong { overflow: hidden; color: var(--ink); font-family: var(--font-mono); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+
 .evaluation-evidence section {
   margin-top: 18px;
   padding-top: 14px;
@@ -981,32 +1006,38 @@
   resize: vertical;
 }
 
+.evaluation-review-note { margin-top: 7px; }
+.evaluation-review-note summary { color: var(--ink-muted); cursor: pointer; font-size: 9px; }
+.evaluation-review-note textarea { margin-top: 7px; }
+
 .evaluation-evidence-attempts {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 
-.evaluation-evidence-attempts button {
+.evaluation-evidence-attempts article {
   display: grid;
-  gap: 3px;
-  min-height: 58px;
-  padding: 7px;
+  min-width: 0;
+  min-height: 92px;
   border: 1px solid var(--border);
   border-top-width: 3px;
   border-radius: 5px;
   background: var(--bg-card);
   color: var(--ink-secondary);
-  cursor: pointer;
+  overflow: hidden;
 }
 
-.evaluation-evidence-attempts button.selected { outline: 2px solid color-mix(in srgb, var(--accent) 32%, transparent); border-color: var(--accent); }
-.evaluation-evidence-attempts button.passed { border-top-color: var(--success); }
-.evaluation-evidence-attempts button.failed { border-top-color: var(--danger); }
-.evaluation-evidence-attempts button.weak { border-top-color: var(--warning); }
-.evaluation-evidence-attempts span { font-family: var(--font-mono); font-size: 8px; }
-.evaluation-evidence-attempts strong { color: var(--ink); font-family: var(--font-mono); font-size: 13px; }
-.evaluation-evidence-attempts em { font-size: 8px; font-style: normal; }
+.evaluation-evidence-attempts article.selected { outline: 2px solid color-mix(in srgb, var(--accent) 32%, transparent); border-color: var(--accent); }
+.evaluation-evidence-attempts article.passed { border-top-color: var(--success); }
+.evaluation-evidence-attempts article.failed { border-top-color: var(--danger); }
+.evaluation-evidence-attempts article.weak { border-top-color: var(--warning); }
+.evaluation-evidence-attempt-main { display: grid; gap: 3px; min-width: 0; padding: 7px; border: 0; background: transparent; color: var(--ink-secondary); text-align: left; cursor: pointer; }
+.evaluation-evidence-attempt-main span { font-family: var(--font-mono); font-size: 8px; }
+.evaluation-evidence-attempt-main strong { color: var(--ink); font-family: var(--font-mono); font-size: 13px; }
+.evaluation-evidence-attempt-main em { font-size: 8px; font-style: normal; }
+.evaluation-evidence-attempts article > .evaluation-decision-buttons { justify-content: center; padding: 4px 5px; border-top: 1px solid var(--eval-rule); }
+.evaluation-evidence-attempts article > .evaluation-save-state { min-height: 12px; padding: 0 5px 3px; }
 
 @media (max-width: 1180px) {
   .evaluation-run-layout { grid-template-columns: 1fr; }
