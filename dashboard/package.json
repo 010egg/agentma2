@@ -31,6 +31,7 @@
     "smoke:provider-routing": "tsx scripts/smoke-provider-routing.mjs",
     "smoke:user-plan-quotas": "node scripts/smoke-user-plan-quotas.mjs",
     "smoke:permission-rules": "node scripts/smoke-permission-rules.mjs",
+    "smoke:memory-stats": "tsx scripts/smoke-memory-stats.mjs",
     "smoke:skills-public": "node scripts/smoke-skills-public.mjs",
     "smoke:visuals": "node scripts/smoke-visuals.mjs",
     "build": "tsc -b && vite build",

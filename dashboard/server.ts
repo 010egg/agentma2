@@ -1531,6 +1531,7 @@ function normalizeAgentTemplateForApi(value: unknown): Record<string, unknown> {
     if (Array.isArray(template[key])) template[key] = normalizeStringArray(template[key]) || [];
   }
   template.visualPreprocessDefault = template.visualPreprocessDefault === true ? true : undefined;
+  template.useMemory = template.useMemory !== false;
   template.visualPreprocessModel = typeof template.visualPreprocessModel === 'string' && template.visualPreprocessModel.trim()
     ? template.visualPreprocessModel.trim()
     : undefined;
@@ -2113,6 +2114,7 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
   const sdkCwd = typeof req.body?.sdkCwd === 'string' ? req.body.sdkCwd.trim() : '';
   const enableFileCheckpointing = req.body?.enableFileCheckpointing === true;
   const useKnowledge = req.body?.useKnowledge === true;
+  const useMemory = template?.useMemory !== false && req.body?.useMemory !== false;
   const knowledgeSourceIds = normalizeStringArray(req.body?.knowledgeSourceIds) || [];
   const datasourceIds = normalizeStringArray(req.body?.datasourceIds ?? template?.datasourceIds) || [];
   const skills = normalizeStringArray(req.body?.skills);
@@ -2336,6 +2338,7 @@ app.post('/api/chat', authMiddleware, async (req: any, res) => {
     resumeSdkSessionId: resumeSdkSessionId || undefined,
     enableFileCheckpointing: enableFileCheckpointing || undefined,
     useKnowledge: useKnowledge || knowledgeSourceIds.length > 0,
+    useMemory,
     knowledgeSourceIds,
     datasourceIds,
     outputFormat: outputSchema ? { type: 'json_schema', schema: outputSchema } : undefined,
@@ -5074,6 +5077,7 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
   const datasourceIds = normalizeStringArray(tmpl?.datasourceIds ?? storedTemplate?.datasourceIds) || [];
   const skills = normalizeStringArray(tmpl?.skills);
   const mcpServers = normalizeStringArray(storedTemplate?.mcpServers || tmpl?.mcpServers);
+  const useMemory = storedTemplate?.useMemory !== false && tmpl?.useMemory !== false && req.body?.useMemory !== false;
   const selectedModel = [
     model,
     tmpl?.model,
@@ -5130,6 +5134,7 @@ app.post('/api/agents/run', authMiddleware, async (req: any, res) => {
       outputFormat: tmpl?.outputSchema ? { type: 'json_schema', schema: tmpl.outputSchema } : undefined,
       enableFileCheckpointing: tmpl?.enableFileCheckpointing === true || undefined,
       useKnowledge: tmpl?.useKnowledge === true || knowledgeSourceIds.length > 0,
+      useMemory,
       knowledgeSourceIds,
       datasourceIds,
       maxTurns: Number(tmpl?.maxTurns) || 20,

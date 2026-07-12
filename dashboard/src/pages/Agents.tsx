@@ -124,6 +124,7 @@ function newTemplate(): AgentTemplate {
     model: '', tools: ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob'],
     mcpServers: [], eventSources: [], skills: [], knowledgeSourceIds: [],
     effort: 'high', maxTurns: 50, permissionMode: 'default',
+    useMemory: true,
     a2aPublished: false, a2aRemoteAgents: [],
     createdAt: Date.now(), updatedAt: Date.now(),
   };
@@ -509,6 +510,7 @@ export default function Agents() {
       deletedAt: form.deletedAt || null,
       knowledgeSourceIds: selectedKnowledgeIds,
       useKnowledge: selectedKnowledgeIds.length > 0 || hasLegacyAllKnowledge || undefined,
+      useMemory: form.useMemory !== false,
       visualPreprocessDefault: form.visualPreprocessDefault === true ? true : undefined,
       visualPreprocessModel: visualModel || undefined,
       a2aPublished: form.a2aPublished === true,
@@ -911,6 +913,9 @@ export default function Agents() {
               title={lastRunLabel}
             >
               使用 {popularity.runCount} 次
+            </span>
+            <span className={`badge ${t.useMemory !== false ? 'badge-success' : 'badge-muted'}`}>
+              记忆{t.useMemory !== false ? '开启' : '关闭'}
             </span>
             <span className="agent-card-date">{new Date(t.updatedAt).toLocaleDateString()}</span>
           </div>
@@ -1555,6 +1560,17 @@ export default function Agents() {
               />
               <span style={{ fontSize: '.85em' }}>
                 enableFileCheckpointing — 编辑前快照文件，支持 /rewind 回滚
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }} title="开启后注入当前用户的记忆索引，Agent 可按需召回正文并写入新记忆。">
+              <input
+                type="checkbox"
+                checked={form.useMemory !== false}
+                onChange={e => setForm({ ...form, useMemory: e.target.checked })}
+                style={{ width: 'auto' }}
+              />
+              <span style={{ fontSize: '.85em' }}>
+                长期记忆 — 注入索引并允许按需召回
               </span>
             </label>
 

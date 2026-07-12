@@ -18,7 +18,7 @@ import { z } from 'zod';
 import { evaluateHookRules, evaluatePermissionRules, listDatasources, listHookRules, listKnowledgeSources, listProtectedSdkCwds, recordAgentRun } from './server-store.ts';
 import type { DatasourceRow, HookRuleEvent } from './server-store.ts';
 import { DATASOURCE_QUERY_MAX_ROWS } from './server-datasource.ts';
-import { buildMemoryMcp, buildMemorySystemPrompt, readMemoryContext } from './server-memory.ts';
+import { buildMemoryMcp, buildMemorySystemPrompt, readMemoryIndex } from './server-memory.ts';
 import { buildDatasourceMcp, buildImageMcp, buildModelRequestMcp, listInternalTools } from './server-internal-tools.ts';
 import { mapResultSubtypeToOutcome, type RunOutcome } from './src/simulator/run-state.ts';
 
@@ -476,6 +476,8 @@ export interface RunAgentOptions {
   /** Allow the agent to read tenant-configured knowledge source directories. */
   useKnowledge?: boolean;
   knowledgeSourceIds?: string[];
+  /** Inject the per-user memory index and expose recall/remember tools. Defaults to enabled. */
+  useMemory?: boolean;
   /** Tenant datasource ids exposed via the read-only datasource MCP tools. */
   datasourceIds?: string[];
   /** Remote A2A Agents exposed as guarded internal MCP tools. */
@@ -511,6 +513,10 @@ export type AgentRunResult = {
   sdkCwd?: string;
   structuredOutput?: unknown;
 };
+
+export function shouldEnableMemoryForRun(opts: Pick<RunAgentOptions, 'tenantId' | 'sub' | 'useMemory'>) {
+  return Boolean(opts.tenantId && opts.sub) && opts.useMemory !== false;
+}
 
 const RUN_CWD_PREFIX = 'agentma-run-';
 const RUN_CWD_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1263,11 +1269,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     })
     : null;
   const uploadedImageGuardEnabled = hasPromptImages || hasAttachmentImages || imageInspectAvailable;
-  // 跨会话记忆(按 tenant/sub 隔离):always-on,注入已存记忆 + 暴露 remember 工具。
-  const memoryEnabled = Boolean(opts.tenantId && opts.sub);
+  // 跨会话记忆(按 tenant/sub 隔离):普通运行默认开启,调用方可显式关闭。
+  const memoryEnabled = shouldEnableMemoryForRun(opts);
   const memoryAuth = { tenantId: opts.tenantId, sub: opts.sub };
   const memoryMcp = memoryEnabled ? buildMemoryMcp(memoryAuth) : null;
-  const memorySystemPrompt = memoryEnabled ? buildMemorySystemPrompt(readMemoryContext(memoryAuth)) : '';
+  const memorySystemPrompt = memoryEnabled ? buildMemorySystemPrompt(readMemoryIndex(memoryAuth)) : '';
   const datasourceSystemPrompt = datasources.length ? buildDatasourceSystemPrompt(datasources) : '';
   const skillsSystemPrompt = runSkills.length ? buildSkillsSystemPrompt(runSkills) : '';
   const askUserQuestionSystemPrompt = opts.tools?.includes('AskUserQuestion') ? buildAskUserQuestionSystemPrompt() : '';

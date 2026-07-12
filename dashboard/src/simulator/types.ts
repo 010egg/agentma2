@@ -422,6 +422,8 @@ export interface AgentTemplate {
   // 知识库：允许 agent 只读访问租户配置的本地笔记目录
   useKnowledge?: boolean;
   knowledgeSourceIds?: string[];
+  // 长期记忆：默认开启；false 时不注入索引，也不暴露 recall/remember 工具。
+  useMemory?: boolean;
   // 视觉预处理：开启后图片先由独立视觉模型识别，再把结果交给 agent。
   visualPreprocessDefault?: boolean;
   visualPreprocessModel?: string;

@@ -2,7 +2,15 @@ import { useState, useEffect } from 'react';
 import { getAuthHeaders } from '../utils/client-runtime';
 
 type MemoryType = 'user' | 'feedback' | 'project' | 'reference';
-interface MemoryItem { name: string; description: string; type: MemoryType; updatedAt: number; sizeBytes: number }
+interface MemoryItem {
+  name: string;
+  description: string;
+  type: MemoryType;
+  updatedAt: number;
+  sizeBytes: number;
+  recallCount: number;
+  lastRecalledAt: number | null;
+}
 interface MemoryDetail extends MemoryItem { body: string }
 
 const TYPE_LABELS: Record<MemoryType, { label: string; color: string }> = {
@@ -163,7 +171,7 @@ export default function Memories() {
         <div className="kpi-card">
           <div className="kpi-label">总体积</div>
           <div className="kpi-value">{(items.reduce((s, m) => s + m.sizeBytes, 0) / 1024).toFixed(1)}K</div>
-          <div className="kpi-sub">注入上限 6K/次</div>
+          <div className="kpi-sub">索引注入上限 6K</div>
         </div>
       </div>
 
@@ -237,6 +245,12 @@ export default function Memories() {
                     <div className="tool-card-desc">{item.description || <span style={{ color: 'var(--ink-muted)' }}>（无摘要）</span>}</div>
                     <div className="mt-2 flex gap-2" style={{ flexWrap: 'wrap' }}>
                       <span className="badge" style={{ background: t.color + '20', color: t.color }}>{t.label}</span>
+                      <span
+                        className="badge badge-muted"
+                        title="Agent 通过 memory.recall 读取该忆块正文时计数；仅展示索引不会计数。"
+                      >
+                        召回 {item.recallCount || 0} 次
+                      </span>
                       <span className="badge badge-muted">{shortDate(item.updatedAt)}</span>
                     </div>
                   </div>

@@ -118,6 +118,7 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
     enableFileCheckpointing: raw.enableFileCheckpointing === true ? true : undefined,
     useKnowledge: raw.useKnowledge === true ? true : undefined,
     knowledgeSourceIds: normalizeStringArray(raw.knowledgeSourceIds),
+    useMemory: raw.useMemory !== false,
     visualPreprocessDefault: raw.visualPreprocessDefault === true ? true : undefined,
     visualPreprocessModel: typeof raw.visualPreprocessModel === 'string' && raw.visualPreprocessModel.trim()
       ? raw.visualPreprocessModel.trim()
