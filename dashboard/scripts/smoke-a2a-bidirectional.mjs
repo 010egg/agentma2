@@ -180,6 +180,9 @@ try {
   assert.match(chatRoute, /a2aRemoteAgents:\s*Array\.isArray\(template\?\.a2aRemoteAgents\)/);
   assert.match(agentRunRoute, /a2aRemoteAgents:\s*Array\.isArray\(storedTemplate\?\.a2aRemoteAgents\)/);
   assert.doesNotMatch(agentRunRoute, /a2aRemoteAgents:\s*Array\.isArray\(tmpl\?\.a2aRemoteAgents\)/);
+  const agentRuntimeSource = fs.readFileSync(path.resolve(import.meta.dirname, '../server-agent.ts'), 'utf8');
+  assert.match(agentRuntimeSource, /const allowedByA2ARemote = a2aRuntimeToolNames\.has\(toolName\)/);
+  assert.match(agentRuntimeSource, /!allowedByBuiltinMemory && !allowedByA2ARemote/);
 
   const stored = JSON.stringify(store.listA2ACredentials(registration.tenantId));
   assert(!stored.includes(secret));
@@ -188,6 +191,7 @@ try {
     checks: [
       'card', 'card-discovery', 'chinese-tool-name', 'credential', 'completed', 'structured-artifact', 'input-required', 'cancel',
       'credential-redaction', 'oversized-remote-event', 'no-secret-leak', 'mcp-runtime-logs', 'chat-runtime-wiring',
+      'template-a2a-authorization',
     ],
   }));
 } finally {

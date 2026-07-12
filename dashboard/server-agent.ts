@@ -1217,10 +1217,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   }
 
   const customMcp = buildCustomToolsMcp(opts.requestTools || []);
+  const a2aRuntimeToolNames = new Set<string>();
   let a2aRemoteMcp = null;
   if (opts.a2aRemoteAgents?.length) {
     const a2aClient = await import('./server-a2a-client.ts');
     const descriptors = a2aClient.describeA2ARemoteTools(opts.a2aRemoteAgents);
+    for (const descriptor of descriptors) a2aRuntimeToolNames.add(descriptor.sdkToolName);
     a2aRemoteMcp = a2aClient.buildA2ARemoteMcp(opts.tenantId, opts.a2aRemoteAgents, {
       requestUserQuestion: opts.requestUserQuestion,
       signal: opts.abortController?.signal,
@@ -1407,7 +1409,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       toolName.startsWith(`mcp__${serverName}__`)
     ));
     const allowedByBuiltinMemory = toolName.startsWith('mcp__memory__');
-    if (templateToolNames.size > 0 && !templateToolNames.has(toolName) && !allowedBySubagentDefinition && !allowedByNativeMcpServer && !allowedByBuiltinMemory) {
+    const allowedByA2ARemote = a2aRuntimeToolNames.has(toolName);
+    if (templateToolNames.size > 0 && !templateToolNames.has(toolName) && !allowedBySubagentDefinition && !allowedByNativeMcpServer && !allowedByBuiltinMemory && !allowedByA2ARemote) {
       return { behavior: 'deny', message: `Tool '${toolName}' is not enabled by the agent template.` } as PermissionResult;
     }
     // 内建记忆工具:写入的是本用户隔离的 memory 目录,自动放行(不弹权限)。
