@@ -25,6 +25,7 @@ export type GuardedFetchOptions = {
   totalTimeoutMs?: number;
   maxRedirects?: number;
   allowLoopbackHttp?: boolean;
+  signal?: AbortSignal;
 };
 
 export type GuardedFetchResponse = {
@@ -208,12 +209,20 @@ function requestOnce(
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    // Assigned once after callbacks are declared; abort closes over this request.
+    // eslint-disable-next-line prefer-const
+    let request: http.ClientRequest;
+    const abort = () => {
+      request?.destroy(new Error('aborted'));
+      finish(new OutboundRequestError('aborted', 'The outbound request was canceled.'));
+    };
     const finish = (error?: OutboundRequestError, response?: GuardedFetchResponse) => {
       if (settled) return;
       settled = true;
       clearTimeout(totalTimer);
       clearTimeout(headersTimer);
       clearTimeout(connectTimer);
+      options.signal?.removeEventListener('abort', abort);
       if (error) reject(error);
       else resolve(response!);
     };
@@ -229,7 +238,7 @@ function requestOnce(
       headers,
       ...(target.url.protocol === 'https:' ? { servername: target.url.hostname.replace(/^\[|\]$/g, '') } : {}),
     };
-    const request = (dependencies.request || defaultRequestFactory)(target.url.protocol as 'http:' | 'https:', requestOptions, (response) => {
+    request = (dependencies.request || defaultRequestFactory)(target.url.protocol as 'http:' | 'https:', requestOptions, (response) => {
       clearTimeout(headersTimer);
       const chunks: Buffer[] = [];
       let bytes = 0;
@@ -271,6 +280,11 @@ function requestOnce(
       socket.once(event, () => clearTimeout(connectTimer));
     });
     request.on('error', () => finish(new OutboundRequestError('request_failed', 'The outbound request failed.')));
+    if (options.signal?.aborted) {
+      abort();
+      return;
+    }
+    options.signal?.addEventListener('abort', abort, { once: true });
     if (body) request.write(body);
     request.end();
   });

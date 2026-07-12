@@ -478,6 +478,8 @@ export interface RunAgentOptions {
   knowledgeSourceIds?: string[];
   /** Tenant datasource ids exposed via the read-only datasource MCP tools. */
   datasourceIds?: string[];
+  /** Remote A2A Agents exposed as guarded internal MCP tools. */
+  a2aRemoteAgents?: Array<{ name: string; agentCardUrl: string; credentialRef?: string }>;
   maxTurns?: number;
   /** Reasoning effort for the MAIN session. Subagent effort is carried separately via AgentDefinition. */
   effort?: EffortLevel;
@@ -1206,6 +1208,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   }
 
   const customMcp = buildCustomToolsMcp(opts.requestTools || []);
+  const a2aRemoteMcp = opts.a2aRemoteAgents?.length
+    ? (await import('./server-a2a-client.ts')).buildA2ARemoteMcp(opts.tenantId, opts.a2aRemoteAgents, {
+      requestUserQuestion: opts.requestUserQuestion,
+      signal: opts.abortController?.signal,
+    })
+    : null;
   const hooks = buildTenantHooks(opts.tenantId, opts.emit);
   const requestedKnowledgeIds = Array.isArray(opts.knowledgeSourceIds) && opts.knowledgeSourceIds.length
     ? new Set(opts.knowledgeSourceIds)
@@ -1559,13 +1567,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         env,
         settings: { showThinkingSummaries: true },
         ...(hooks ? { hooks, includeHookEvents: true } : {}),
-        ...(customMcp || datasourceMcp || modelRequestMcp || imageMcp || memoryMcp ? {
+        ...(customMcp || datasourceMcp || modelRequestMcp || imageMcp || memoryMcp || a2aRemoteMcp ? {
           mcpServers: {
             ...(customMcp ? { custom: customMcp } : {}),
             ...(datasourceMcp ? { datasource: datasourceMcp } : {}),
             ...(modelRequestMcp ? { model: modelRequestMcp } : {}),
             ...(imageMcp ? { image: imageMcp } : {}),
             ...(memoryMcp ? { memory: memoryMcp } : {}),
+            ...(a2aRemoteMcp ? { a2a: a2aRemoteMcp } : {}),
           },
         } : {}),
         ...(effectiveSystemPrompt ? { systemPrompt: effectiveSystemPrompt } : {}),

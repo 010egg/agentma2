@@ -529,6 +529,9 @@ export class A2AExecutionManager {
           : undefined,
         skills: stringArray(template.skills),
         mcpServers: stringArray(template.mcpServers),
+        a2aRemoteAgents: Array.isArray(template.a2aRemoteAgents)
+          ? template.a2aRemoteAgents as RunAgentOptions['a2aRemoteAgents']
+          : undefined,
         outputFormat: template.outputSchema && typeof template.outputSchema === 'object' && !Array.isArray(template.outputSchema)
           ? { type: 'json_schema', schema: template.outputSchema as Record<string, unknown> }
           : undefined,
