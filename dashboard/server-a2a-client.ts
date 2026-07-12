@@ -14,21 +14,49 @@ type QuestionRequester = (request: {
 const CARD_TTL_MS = 5 * 60 * 1000;
 const CARD_MAX_BYTES = 256 * 1024;
 const RPC_MAX_BYTES = 2 * 1024 * 1024;
-const cache = new Map<string, { expiresAt: number; rpcUrl: string }>();
+const cache = new Map<string, {
+  expiresAt: number;
+  name: string;
+  description: string;
+  rpcUrl: string;
+}>();
 
 function allowLoopbackHttp() {
   return process.env.AGENTMA_A2A_ALLOW_LOOPBACK_HTTP === '1';
 }
 
-function safeToolName(name: string, index: number) {
-  const slug = name.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
-  return `remote_${slug || index + 1}`;
+function cleanCardText(value: unknown, fallback: string, maxLength: number) {
+  const text = typeof value === 'string'
+    ? Array.from(value, character => character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f ? ' ' : character)
+      .join('')
+      .trim()
+    : '';
+  return (text || fallback).slice(0, maxLength);
 }
 
-async function resolveRpcUrl(tenantId: string, cardUrl: string) {
+export function remoteA2AToolName(
+  name: string,
+  agentCardUrl: string,
+  index: number,
+  usedNames = new Set<string>(),
+) {
+  const slug = name.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  const base = `remote_${slug || 'agent'}`;
+  let candidate = base;
+  if (!slug || usedNames.has(candidate)) {
+    const hash = crypto.createHash('sha256').update(`${name}\0${agentCardUrl}\0${index}`).digest('hex').slice(0, 8);
+    candidate = `${base.slice(0, 54)}_${hash}`;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+export async function discoverA2ARemoteAgent(tenantId: string, cardUrl: string) {
   const key = `${tenantId}\0${cardUrl}`;
   const cached = cache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.rpcUrl;
+  if (cached && cached.expiresAt > Date.now()) {
+    return { name: cached.name, description: cached.description, rpcUrl: cached.rpcUrl };
+  }
   const response = await guardedFetch(cardUrl, {
     headers: { 'A2A-Version': '1.0', Accept: 'application/json' },
     maxBytes: CARD_MAX_BYTES,
@@ -56,9 +84,19 @@ async function resolveRpcUrl(tenantId: string, cardUrl: string) {
   }).catch((error) => {
     if ((error as { code?: string }).code === 'blocked_destination') throw error;
   });
-  cache.set(key, { expiresAt: Date.now() + CARD_TTL_MS, rpcUrl: rpc.url });
+  const fallbackName = cleanCardText(new URL(cardUrl).hostname, 'Remote Agent', 64);
+  const discovered = {
+    name: cleanCardText(card.name, fallbackName, 64),
+    description: cleanCardText(card.description, '', 500),
+    rpcUrl: rpc.url,
+  };
+  cache.set(key, { expiresAt: Date.now() + CARD_TTL_MS, ...discovered });
   if (cache.size > 100) cache.delete(cache.keys().next().value!);
-  return rpc.url;
+  return discovered;
+}
+
+async function resolveRpcUrl(tenantId: string, cardUrl: string) {
+  return (await discoverA2ARemoteAgent(tenantId, cardUrl)).rpcUrl;
 }
 
 function redactCredential(value: string, credential: string | null) {
@@ -171,8 +209,9 @@ export function buildA2ARemoteMcp(
   remotes: A2ARemoteConfig[],
   options: { requestUserQuestion?: QuestionRequester; signal?: AbortSignal } = {},
 ) {
+  const usedToolNames = new Set<string>();
   const tools = remotes.slice(0, 16).map((config, index) => tool(
-    safeToolName(config.name, index),
+    remoteA2AToolName(config.name, config.agentCardUrl, index, usedToolNames),
     `Call remote A2A Agent: ${config.name}`,
     { text: z.string().max(64 * 1024).optional(), data: z.unknown().optional() },
     async (args) => {

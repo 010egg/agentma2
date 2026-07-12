@@ -77,7 +77,7 @@ function normalizeA2ARemoteAgents(value: unknown): A2ARemoteAgentConfig[] {
     const raw = item as Record<string, unknown>;
     const name = typeof raw.name === 'string' ? raw.name.trim() : '';
     const agentCardUrl = typeof raw.agentCardUrl === 'string' ? raw.agentCardUrl.trim() : '';
-    if (!name || !agentCardUrl) return [];
+    if (!agentCardUrl) return [];
     const credentialRef = typeof raw.credentialRef === 'string' ? raw.credentialRef.trim() : '';
     return [{ name, agentCardUrl, credentialRef: credentialRef || undefined }];
   });

@@ -10,6 +10,18 @@ type A2ACredentialMetadata = {
   rotatedAt: number | null;
 };
 
+type A2ADiscovery = {
+  name: string;
+  description: string;
+  rpcUrl: string;
+};
+
+type A2ADiscoveryState = {
+  url: string;
+  status: 'loading' | 'success' | 'error';
+  message: string;
+};
+
 type Props = {
   templateId: string;
   published: boolean;
@@ -49,12 +61,19 @@ export default function A2AConfigEditor({
   const [credentialError, setCredentialError] = useState('');
   const [credentialBusyId, setCredentialBusyId] = useState<string | null>(null);
   const [rotatingCredentialId, setRotatingCredentialId] = useState<string | null>(null);
+  const [remoteDiscovery, setRemoteDiscovery] = useState<Record<number, A2ADiscoveryState>>({});
+  const remoteAgentsRef = useRef(remoteAgents);
+  const discoveryRequestRef = useRef<Record<number, number>>({});
   const newCredentialNameRef = useRef<HTMLInputElement | null>(null);
   const newCredentialSecretRef = useRef<HTMLInputElement | null>(null);
   const rotateCredentialSecretRef = useRef<HTMLInputElement | null>(null);
   const agentCardUrl = templateId
     ? `${window.location.origin}/a2a/agents/${encodeURIComponent(templateId)}/.well-known/agent-card.json`
     : '';
+
+  useEffect(() => {
+    remoteAgentsRef.current = remoteAgents;
+  }, [remoteAgents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,13 +191,60 @@ export default function A2AConfigEditor({
   };
 
   const updateRemoteAgent = (index: number, patch: Partial<A2ARemoteAgentConfig>) => {
-    onRemoteAgentsChange(remoteAgents.map((remote, remoteIndex) => (
+    const next = remoteAgentsRef.current.map((remote, remoteIndex) => (
       remoteIndex === index ? { ...remote, ...patch } : remote
-    )));
+    ));
+    remoteAgentsRef.current = next;
+    onRemoteAgentsChange(next);
   };
 
   const deleteRemoteAgent = (index: number) => {
-    onRemoteAgentsChange(remoteAgents.filter((_, remoteIndex) => remoteIndex !== index));
+    const next = remoteAgentsRef.current.filter((_, remoteIndex) => remoteIndex !== index);
+    remoteAgentsRef.current = next;
+    onRemoteAgentsChange(next);
+    setRemoteDiscovery({});
+  };
+
+  const discoverRemoteAgent = async (index: number) => {
+    const remote = remoteAgentsRef.current[index];
+    const url = remote?.agentCardUrl.trim() || '';
+    if (!url) return;
+    try {
+      new URL(url);
+    } catch {
+      setRemoteDiscovery(current => ({
+        ...current,
+        [index]: { url, status: 'error', message: '请先输入有效的绝对 URL' },
+      }));
+      return;
+    }
+    const currentState = remoteDiscovery[index];
+    if (currentState?.url === url && currentState.status === 'success') return;
+    const requestId = (discoveryRequestRef.current[index] || 0) + 1;
+    discoveryRequestRef.current[index] = requestId;
+    setRemoteDiscovery(current => ({
+      ...current,
+      [index]: { url, status: 'loading', message: '正在读取 Agent Card…' },
+    }));
+    try {
+      const response = await fetch(`/api/a2a/discover?url=${encodeURIComponent(url)}`, {
+        headers: getAuthHeaders(),
+      });
+      const discovered = await readApiResponse<A2ADiscovery>(response);
+      const latest = remoteAgentsRef.current[index];
+      if (discoveryRequestRef.current[index] !== requestId || latest?.agentCardUrl.trim() !== url) return;
+      if (!latest.name.trim()) updateRemoteAgent(index, { name: discovered.name });
+      setRemoteDiscovery(current => ({
+        ...current,
+        [index]: { url, status: 'success', message: `已识别：${discovered.name}` },
+      }));
+    } catch (discoveryError) {
+      if (discoveryRequestRef.current[index] !== requestId) return;
+      setRemoteDiscovery(current => ({
+        ...current,
+        [index]: { url, status: 'error', message: (discoveryError as Error).message || '无法读取 Agent Card' },
+      }));
+    }
   };
 
   return (
@@ -229,7 +295,7 @@ export default function A2AConfigEditor({
       <div className="a2a-remotes-head">
         <div>
           <div className="a2a-section-label">远程 Agent</div>
-          <div className="a2a-field-help">名称在当前模板内必须唯一。生产环境 Card URL 必须使用 HTTPS。</div>
+          <div className="a2a-field-help">只需填写 Card URL；名称会自动读取，也可设置当前模板内唯一的本地别名。</div>
         </div>
         <button
           type="button"
@@ -250,30 +316,59 @@ export default function A2AConfigEditor({
             const credentialAvailable = !remote.credentialRef
               || credentials.some(credential => credential.id === remote.credentialRef);
             return (
-              <div key={`${index}-${remote.name}`} className="a2a-remote-row">
+              <div key={index} className="a2a-remote-row">
                 <div className="a2a-remote-index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</div>
                 <div className="a2a-remote-fields">
                   <div className="form-group">
-                    <label htmlFor={`a2a-remote-name-${index}`}>名称 *</label>
+                    <label htmlFor={`a2a-remote-name-${index}`}>本地名称（可选）</label>
                     <input
                       id={`a2a-remote-name-${index}`}
                       value={remote.name}
                       maxLength={64}
                       onChange={event => updateRemoteAgent(index, { name: event.target.value })}
-                      placeholder="例如：research-agent"
+                      placeholder="自动使用 Agent Card 名称"
                       autoComplete="off"
                     />
+                    <div className="a2a-field-help">支持中文；填写后作为本地别名，不受远端 Card 改名影响。</div>
                   </div>
                   <div className="form-group a2a-remote-url-field">
                     <label htmlFor={`a2a-remote-url-${index}`}>Agent Card URL *</label>
-                    <input
-                      id={`a2a-remote-url-${index}`}
-                      type="url"
-                      value={remote.agentCardUrl}
-                      onChange={event => updateRemoteAgent(index, { agentCardUrl: event.target.value })}
-                      placeholder="https://agent.example/.well-known/agent-card.json"
-                      autoComplete="url"
-                    />
+                    <div className="a2a-card-url-row">
+                      <input
+                        id={`a2a-remote-url-${index}`}
+                        type="url"
+                        value={remote.agentCardUrl}
+                        onChange={event => {
+                          updateRemoteAgent(index, { agentCardUrl: event.target.value });
+                          setRemoteDiscovery(current => {
+                            const next = { ...current };
+                            delete next[index];
+                            return next;
+                          });
+                        }}
+                        onBlur={() => { void discoverRemoteAgent(index); }}
+                        placeholder="https://agent.example/.well-known/agent-card.json"
+                        maxLength={2048}
+                        autoComplete="url"
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={!remote.agentCardUrl.trim() || remoteDiscovery[index]?.status === 'loading'}
+                        onMouseDown={event => event.preventDefault()}
+                        onClick={() => { void discoverRemoteAgent(index); }}
+                      >
+                        {remoteDiscovery[index]?.status === 'loading' ? '识别中…' : '识别'}
+                      </button>
+                    </div>
+                    {remoteDiscovery[index] && (
+                      <div
+                        className={remoteDiscovery[index].status === 'error' ? 'a2a-inline-error' : 'a2a-field-help'}
+                        role={remoteDiscovery[index].status === 'error' ? 'alert' : undefined}
+                      >
+                        {remoteDiscovery[index].message}
+                      </div>
+                    )}
                   </div>
                   <div className="form-group">
                     <label htmlFor={`a2a-remote-credential-${index}`}>Bearer 凭据</label>

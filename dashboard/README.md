@@ -56,6 +56,8 @@ RPC 请求必须同时发送 `Authorization: Bearer <AgentMa API Key>`、`A2A-Ve
 
 模板也可配置最多 16 个远程 A2A Agent。运行时它们会作为受限 MCP 工具注入，远程 Card/RPC 只支持 A2A 1.0 JSON-RPC，并统一经过下述出站 URL 防护。
 
+在 Agent 编辑器中添加远程 Agent 时只需填写 Card URL；系统会安全读取 Card 名称并自动填充。名称是可选的本地别名，支持中文，并会转换为稳定、符合工具协议限制的内部名称。
+
 部署相关环境变量：
 
 - `AGENTMA_PUBLIC_URL`：对外可访问的站点根 URL，用于生成 Card 中的绝对 RPC URL。
@@ -83,35 +85,6 @@ A2A 远程 Agent 的 Bearer 凭据使用 AES-256-GCM 加密后写入 SQLite。�
 - 未配置环境变量时，自动创建 `~/Library/Application Support/agentma2/a2a-credential-key`，权限为 `0600`。
 
 备份数据库时必须同时备份该主密钥文件。主密钥丢失后，已有远程凭据无法恢复；密钥和数据库也不应存放在同一个公开备份中。
-
-## 抖音受控浏览器
-
-内部工具 `media.douyin_resolve` 使用 dashboard 主进程中的 `playwright-core` 驱动宿主 Chrome。租户 agent 只会看到窄 MCP 工具 `mcp__media__douyin_resolve`，不会获得 page/browser 句柄或任意网页访问能力。
-
-- `AGENTMA_BROWSER_CONCURRENCY`：全平台同时解析数，默认 `2`，范围 `1-16`。
-- `AGENTMA_BROWSER_IDLE_MS`：浏览器空闲自动关闭时间，默认 `300000` 毫秒。
-- `AGENTMA_DOUYIN_RESOLVE_TIMEOUT_MS`：单次解析总超时，默认 `30000` 毫秒。
-- `AGENTMA_TRANSCRIBE_TIMEOUT_MS`：单个转写任务执行超时，默认 `600000` 毫秒。
-- `AGENTMA_TRANSCRIBE_URL_HOSTS`：逗号分隔，追加允许转写的媒体 CDN host 后缀。
-- `AGENTMA_TRANSCRIBE_VENV`：固定转写虚拟环境，默认 `/opt/agentma/transcribe-venv`。
-- `AGENTMA_HF_CACHE`：离线模型缓存，默认 `/opt/agentma/hf-cache`。
-
-部署机必须安装 Google Chrome 与 ffmpeg。macOS Apple Silicon 使用固定 venv 中的 mlx-whisper；运行时强制 `HF_HUB_OFFLINE=1`，不会下载模型。首次部署执行：
-
-```bash
-./scripts/setup-transcribe-host.sh
-```
-
-该脚本创建 `/opt/agentma/transcribe-venv`、预下载 `mlx-community/whisper-large-v3-turbo` 到 `/opt/agentma/hf-cache`，并将模型缓存设为只读。Linux 部署需要将 worker 实现替换为 faster-whisper 或 whisper.cpp。
-
-本地安全与生命周期 smoke：
-
-```bash
-npm run smoke:douyin-resolve
-npm run smoke:transcribe
-```
-
-如需额外执行真实链接验证，可设置 `AGENTMA_SMOKE_DOUYIN_URL`。设置 `AGENTMA_SMOKE_TRANSCRIBE_LIVE=1` 会用本地短音频加载离线模型并跑通真实 worker。
 
 ## 构建
 
